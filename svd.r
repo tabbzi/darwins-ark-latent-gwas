@@ -240,12 +240,14 @@ i = 1
 
 result = calculate_contribution_scores(res_tsvd$u, res_tsvd$v, i)
 
+# Prepare phenotype data
 con.phe = bind_cols((phe %>% select(phe)),
-          data.frame(score=result$phenotype_contribution)) %>%
+                    data.frame(score=result$phenotype_contribution)) %>%
   arrange(desc(score)) %>%
   head(5) %>%
   mutate(neg_log_score = -log10(score))
 
+# Prepare variant data
 con.var = bind_cols(var,
                     data.frame(score=result$variant_contribution)) %>%
   mutate(
@@ -253,34 +255,45 @@ con.var = bind_cols(var,
     chr = as.factor(chr)
   )
 
-p.con.var <- ggplot(con.var, 
-                    aes(x = pos, 
-                        y = neg_log_score, 
-                        color = chr)) +
-  geom_point() +
-  scale_color_manual(values = rep(c("blue", "red"), length(unique(con.var$chr)) / 2)) +
-  facet_wrap(~ chr, scales = "free_x") +
-  theme_minimal() +
-  labs(
-    title = "Genome-wide Scores",
-    x = "Position",
-    y = "-log10(Score)"
-  )
+# Calculate maximum position for each chromosome and cumulative position offset
+data_cum <- con.var %>%
+  group_by(chr) %>%
+  summarise(max.pos = max(pos)) %>%
+  mutate(pos.add = lag(cumsum(as.numeric(max.pos)), default = 0))
 
-p.con.phe <- ggplot(con.phe, 
-                    aes(x = phe, 
-                        y = neg_log_score)) +
+# Add cumulative positions to original data
+con.var <- inner_join(con.var, data_cum, by = "chr") %>%
+  mutate(pos.cum = pos + pos.add)
+
+# Calculate axis centers
+axis.set <- con.var %>%
+  group_by(chr) %>%
+  summarize(center = mean(pos.cum))
+
+# Generate the variant plot
+p.con.var <- ggplot(con.var, aes(x = pos.cum, y = neg_log_score)) +
+  geom_point(alpha = 0.5) +
+  scale_x_continuous(label = axis.set$chr, breaks = axis.set$center) +
+  scale_color_manual(values = rainbow(length(unique(con.var$chr)))) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(title = "Genome-wide Scores",
+       x = "Position",
+       y = "-log10(Score)") +
+  theme_pubr()
+
+# Generate the phenotype plot
+p.con.phe <- ggplot(con.phe, aes(x = neg_log_score, y = phe)) +
   geom_bar(stat = "identity") +
   theme_minimal() +
-  labs(
-    title = "Top 5 Phenotype Contributions",
-    x = "Phenotype",
-    y = "-log10(Score)"
-  )
+  labs(title = "Top 5 Phenotype Contributions",
+       x = "-log10(Score)",
+       y = "Phenotype") +
+  coord_flip() +
+  theme_pubr()
 
-# Combine using patchwork
-combined_plot <- p1 / p2
+# Combine the two plots using patchwork
+combined_plot <- p.con.var / p.con.phe
 
 # Show the plot
 combined_plot
-
