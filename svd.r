@@ -92,7 +92,8 @@ mat[is.na(mat)] <- 0  # replacing NAs with 0
 mat[is.infinite(mat)] <- 0  # replacing Inf with 0
 
 # Run tSVD
-res_tsvd <- irlba(t(mat), nv = 40)
+n_comp = 40
+res_tsvd <- irlba(t(mat), nv = n_comp)
 
 # Save outputs
 saveRDS(res_tsvd$d, "~/Documents/GitHub/darwins-ark-latent-gwas/d_values.rds")
@@ -232,26 +233,41 @@ calculate_contribution_scores <- function(U_matrix, V_matrix, i) {
   
   list(
     phenotype_contribution = cntrphe,
-    variant_contribution = cntrvar
+    phenotype_eigenvalue = U_matrix[, i],
+    variant_contribution = cntrvar,
+    variant_eigenvalue = V_matrix[, i]
   )
 }
 
-i = 1
+con.phe.list = list()
+for (i in 1:n_comp){
+  con.phe.list[[i]] = 
+    bind_cols((phe %>% select(phe)),
+              data.frame(score=calculate_contribution_scores(res_tsvd$u, res_tsvd$v, i)$phenotype_contribution)) %>%
+    as.data.frame() %>%
+    arrange(desc(score)) %>%
+    head(5) %>%
+    mutate(component = i)
+    
+}
+con.phe.list = rbindlist(con.phe.list)
+
+i = 10
 
 result = calculate_contribution_scores(res_tsvd$u, res_tsvd$v, i)
 
 # Prepare phenotype data
 con.phe = bind_cols((phe %>% select(phe)),
-                    data.frame(score=result$phenotype_contribution)) %>%
+                    data.frame(score=result$phenotype_contribution,
+                               eigen=result$phenotype_eigenvalue)) %>%
   arrange(desc(score)) %>%
-  head(5) %>%
-  mutate(neg_log_score = -log10(score))
+  head(5)
 
 # Prepare variant data
 con.var = bind_cols(var,
-                    data.frame(score=result$variant_contribution)) %>%
+                    data.frame(score=result$variant_contribution,
+                               eigen=result$variant_eigenvalue)) %>%
   mutate(
-    neg_log_score = -log10(score),
     chr = as.factor(chr)
   )
 
@@ -265,16 +281,33 @@ data_cum <- con.var %>%
 con.var <- inner_join(con.var, data_cum, by = "chr") %>%
   mutate(pos.cum = pos + pos.add)
 
+# Add color for each chromosome based on a rainbow color palette
+chrom_colors <- rainbow(length(unique(con.var$chr)))
+con.var <- con.var %>%
+  mutate(color = chrom_colors[as.integer(chr)])
+
 # Calculate axis centers
 axis.set <- con.var %>%
   group_by(chr) %>%
   summarize(center = mean(pos.cum))
 
+# Label top SNPs (uppermost quartile per chromosome)
+con.var <- con.var %>%
+  group_by(chr) %>%
+  mutate(top_snp = score >= quantile(score, 1-1e-8)) %>%
+  ungroup()
+
 # Generate the variant plot
-p.con.var <- ggplot(con.var, aes(x = pos.cum, y = neg_log_score)) +
-  geom_point(alpha = 0.5) +
+p.con.var <- ggplot(con.var, aes(x = pos.cum, 
+                                 y = eigen)) +
+  geom_point(aes(color = color),
+             alpha = 0.5) +
+  geom_text_repel(
+    data = subset(con.var, top_snp),
+    aes(label = snp)
+  ) +
   scale_x_continuous(label = axis.set$chr, breaks = axis.set$center) +
-  scale_color_manual(values = rainbow(length(unique(con.var$chr)))) +
+  scale_color_identity() +
   theme_minimal() +
   theme(legend.position = "none") +
   labs(title = "Genome-wide Scores",
@@ -283,13 +316,12 @@ p.con.var <- ggplot(con.var, aes(x = pos.cum, y = neg_log_score)) +
   theme_pubr()
 
 # Generate the phenotype plot
-p.con.phe <- ggplot(con.phe, aes(x = neg_log_score, y = phe)) +
+p.con.phe <- ggplot(con.phe, aes(x = score, y = phe)) +
   geom_bar(stat = "identity") +
   theme_minimal() +
   labs(title = "Top 5 Phenotype Contributions",
        x = "-log10(Score)",
        y = "Phenotype") +
-  coord_flip() +
   theme_pubr()
 
 # Combine the two plots using patchwork
@@ -297,3 +329,4 @@ combined_plot <- p.con.var / p.con.phe
 
 # Show the plot
 combined_plot
+
