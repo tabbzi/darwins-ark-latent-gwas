@@ -7,25 +7,49 @@
 #' @version 1.0.0
 #' @license MIT
 
+## LIBRARIES ----
 library(tidyverse)
 library(data.table)
 library(irlba)
+library(lavaan)
 library(ggrepel)
 library(ggpubr)
 library(plotly)
 library(patchwork)
 
-## GWAS z-scores
+## FUNCTIONS ----
+calculate_contribution_scores <- function(U_matrix, V_matrix, i) {
+  # For phenotypes
+  cntrphe <- U_matrix[, i]^2
+  
+  # For variants
+  cntrvar <- V_matrix[, i]^2
+  
+  # Normalize scores so they sum to 1
+  cntrphe <- cntrphe / sum(cntrphe)
+  cntrvar <- cntrvar / sum(cntrvar)
+  
+  list(
+    phenotype_contribution = cntrphe,
+    phenotype_eigenvalue = U_matrix[, i],
+    variant_contribution = cntrvar,
+    variant_eigenvalue = V_matrix[, i]
+  )
+}
+
+## INPUT DATA ----
+
 # Read in z-score matrix file
 mat = fread("~/Documents/GitHub/darwins-ark-latent-gwas/final_z_matrix.csv")
 
-## Phenotypes
 # Read in phenotype index file
 phe = read_csv("~/Documents/GitHub/darwins-ark-latent-gwas/final_phe_info.csv")
+
+# Re-index phenotypes and extract information from file names
 phe$index = seq(1,nrow(phe))-1
 phe$phe_code = sub('.*phe-(.*?)_.*', '\\1', basename(phe$file))
 
-# Name phenotypes
+# Re-name phenotypes
 items = read_csv("~/Documents/GitHub/darwins-ark-latent-gwas/data_release/dat/DarwinsArk_20221120_questions.csv")
 factors = data.frame(factor = seq(1,25),
                      factor_name = c("Human Sociability",
@@ -71,7 +95,7 @@ id_rm = phe %>% filter(file %like% "qcov-age.fa") %>% pull(index)
 # Index item GWA with quantitative scores
 id_rm = c(id_rm, (phe %>% filter(phe_code %like% "bq." & !phe_code %like% "mean-binary") %>% pull(index)))
 
-# Remove those GWA
+# Remove indexed GWA results
 phe = phe %>% arrange(index) %>% filter(!index %in% id_rm)
 
 phe = phe %>%
@@ -81,169 +105,209 @@ phe = phe %>%
                                paste(factor_name," (F#",factor,")", sep = ""),
                                phe_code)))
 
+# Index and separate morphology and behavior item GWA
+id_mor = phe %>%
+  filter(phe_code %like% "mq." | phe_code %like% "mp.") %>%
+  pull(index)
+
+mat_mor = mat %>% select(any_of(as.character(id_mor)))
+
+id_beh = phe %>%
+  filter(phe_code %like% "bq.") %>%
+  pull(index)
+
+mat_beh = mat %>% select(any_of(as.character(id_beh)))
+
+# Prepare variant, phenotype, and matrix data
 var = mat %>% select(chr=Chr, pos=bp, snp=SNP, ref=A2, alt=A1)
 diff = setdiff(as.character(phe$index), colnames(mat))
 mat = mat %>% select(any_of(as.character(phe$index)))
 phe = phe %>% filter(index != diff)
 
-#mat = as.matrix(mat[,-c(1,2,3,4,5)])
 mat = as.matrix(mat)
 mat[is.na(mat)] <- 0  # replacing NAs with 0
 mat[is.infinite(mat)] <- 0  # replacing Inf with 0
 
-# Run tSVD
-n_comp = 40
-res_tsvd <- irlba(t(mat), nv = n_comp)
+n_phe = ncol(mat)
+n_var = nrow(mat)
 
-# Save outputs
-saveRDS(res_tsvd$d, "~/Documents/GitHub/darwins-ark-latent-gwas/d_values.rds")
-saveRDS(res_tsvd$u, "~/Documents/GitHub/darwins-ark-latent-gwas/u_matrix.rds")
-saveRDS(res_tsvd$v, "~/Documents/GitHub/darwins-ark-latent-gwas/v_matrix.rds")
-write_csv(as.data.frame(res_tsvd$d), "~/Documents/GitHub/darwins-ark-latent-gwas/d_values.csv")
-write_csv(as.data.frame(res_tsvd$u), "~/Documents/GitHub/darwins-ark-latent-gwas/u_values.csv")
-write_csv(as.data.frame(res_tsvd$v), "~/Documents/GitHub/darwins-ark-latent-gwas/v_values.csv")
+mat_mor = as.matrix(mat_mor)
+mat_mor[is.na(mat_mor)] <- 0
+mat_mor[is.infinite(mat_mor)] <- 0
+tsvd_result_mor <- irlba(t(mat_mor), nv = 5)
+
+mat_beh = as.matrix(mat_beh)
+mat_beh[is.na(mat_beh)] <- 0
+mat_beh[is.infinite(mat_beh)] <- 0
+tsvd_result_beh <- irlba(t(mat_beh), nv = 10)
+
+# Run truncated singular value decomposition
+n_svd = 20
+tsvd_result <- irlba(t(mat), nv = n_svd)
+
+# Save tSVD results to file
+write_csv(as.data.frame(tsvd_result$d), "~/Documents/GitHub/darwins-ark-latent-gwas/d_values.csv")
+write_csv(as.data.frame(tsvd_result$u), "~/Documents/GitHub/darwins-ark-latent-gwas/u_values.csv")
+write_csv(as.data.frame(tsvd_result$v), "~/Documents/GitHub/darwins-ark-latent-gwas/v_values.csv")
 
 # Scree Plot: relative variance explained by each of the components
-p.scree = data.frame(S = res_tsvd$d,
-                     Index = 1:length(res_tsvd$d)) %>%
+p.scree = data.frame(S = tsvd_result$d,
+                     Index = 1:length(tsvd_result$d)) %>%
   ggplot(aes(x = Index, 
              y = S)) +
-  geom_point() +
-  geom_line() +
+  geom_line(color = "#2B555D") +
+  geom_point(color = "#2B555D", shape = 21, fill = "#5FA29B", stroke = 1, size = 3, aes(color = NA)) +
   xlab("component index") +
   ylab("singular value") +
+  theme_pubr() +
+  theme(legend.position = "none",
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        text = element_text(color = "#2B555D"),
+        axis.title = element_text(color = "#2B555D"),
+        axis.text = element_text(color = "#2B555D"),
+        axis.ticks = element_line(color = "#2B555D")) 
+
+ggsave(filename = "~/Documents/GitHub/darwins-ark-latent-gwas/scree-plot.png",
+       plot = p.scree,
+       device = "png",
+       bg = "transparent", 
+       width = 6,
+       height = 5,
+       units = "in")
+
+# Summarize results
+svd_gwa <- data.frame()
+
+for (i in 1:20) {
+  
+  # Extract eigenvalues and component loadings
+  eigenvalue_i <- tsvd_result$d[i]
+  loading_i <- tsvd_result$u[, i]
+  
+  # Calculate weights for the weighted random effect model
+  weights_i <- loading_i * eigenvalue_i
+  
+  # Calculate meta z-score for all variants for component i
+  met_z <- rowSums(mat * weights_i) / sqrt(sum(weights_i^2))
+  
+  # Calculate meta p-value for all variants for component i
+  met_p <- 2 * (1 - pnorm(abs(met_z)))
+  
+  tmp_df <- data.frame(
+    svd = rep(i, length(met_z)),
+    chr = var$chr,
+    pos = var$pos,
+    ref = var$ref,
+    alt = var$alt,
+    snp = var$snp,
+    svd_var_con = tsvd_result$v[, i],
+    met_z = met_z,
+    met_p = met_p
+  )
+  
+  svd_gwa <- rbind(svd_gwa, tmp_df)
+}
+
+svd_gwa = svd_gwa %>%
+  group_by(svd) %>%
+  mutate(met_p_cor_BH = p.adjust(met_p, method = "BH"),
+         met_p_cor_BY = p.adjust(met_p, method = "BY"))
+
+## Exploratory factor analysis ----
+efa  = factanal(covmat = Ssmooth, factors = 2, rotation = "promax")
+
+## Structural equation modeling ----
+i = 1
+
+# Extract important phenotypes and variants based on the i-th component
+phe_ids <- order(abs(tsvd_result$u[,i]), decreasing = TRUE)[1:5]
+var_ids <- order(abs(tsvd_result$v[,i]), decreasing = TRUE)[1:5]
+
+# Generate variable names
+var_names <- paste("V", var_ids, sep = "")
+phe_names <- paste("P", phe_ids, sep = "")
+
+# Construct the SEM model string
+sem_model <- paste(
+  paste(var_names, collapse = " + "),
+  "~",
+  paste(phe_names, collapse = " + "),
+  sep = " "
+)
+
+# Convert matrix to a data frame and rename columns and rows
+mat_df <- as.data.frame(mat)
+colnames(mat_df) <- paste("P", 1:ncol(mat), sep = "")
+rownames(mat_df) <- paste("V", 1:nrow(mat), sep = "")
+
+# Fit the SEM model
+fit <- sem(sem_model, data=mat_df)
+
+# Summary of fit
+summary(fit, fit.measures=TRUE)
+
+## Unorganized code ----
+# Plot meta_p values
+i = 1
+
+# Calculate maximum position for each chromosome and cumulative position offset
+data_cum <- svd_gwa %>%
+  filter(svd==i)
+  group_by(chr) %>%
+  summarise(max.pos = max(pos)) %>%
+  mutate(pos.add = lag(cumsum(as.numeric(max.pos)), default = 0))
+
+# Add cumulative positions to original data
+con.var <- inner_join(con.var, data_cum, by = "chr") %>%
+  mutate(pos.cum = pos + pos.add)
+
+# Add color for each chromosome based on a rainbow color palette
+chrom_colors <- rainbow(length(unique(con.var$chr)))
+con.var <- con.var %>%
+  mutate(color = chrom_colors[as.integer(chr)])
+
+# Add color for each chromosome based on a bicolor palette
+chrom_colors <- rep(x = c("#5FA29B","#2B555D"), length(unique(con.var$chr))/2)
+con.var <- con.var %>%
+  mutate(color = chrom_colors[as.integer(chr)])
+
+# Calculate axis centers
+axis.set <- con.var %>%
+  group_by(chr) %>%
+  summarize(center = mean(pos.cum))
+
+# Label top SNPs (uppermost quartile per chromosome)
+con.var <- con.var %>%
+  group_by(chr) %>%
+  mutate(top_snp = score >= quantile(score, 1-1e-8)) %>%
+  ungroup()
+
+# Generate the variant plot
+p <- ggplot(con.var, aes(x = pos.cum, 
+                                 y = eigen)) +
+  geom_point(aes(color = color),
+             alpha = 0.5) +
+  geom_text_repel(
+    data = subset(con.var, top_snp),
+    aes(label = snp)
+  ) +
+  scale_x_continuous(label = axis.set$chr, breaks = axis.set$center) +
+  scale_color_identity() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(title = "Genome-wide Scores",
+       x = "Position",
+       y = "-log10(Score)") +
   theme_pubr()
-p.scree
-
-# Load PHATE output
-phate_output = read_csv("~/Documents/GitHub/darwins-ark-latent-gwas/phate_output.csv", col_names = F)
-
-p.phate = phate_output %>%
-  mutate(index = row_number()-1) %>%
-  merge(phe, by = "index") %>%
-  ggplot(aes(x = X1,
-             y = X2,
-             label = phe)) +
-  geom_point() +
-  geom_text_repel() +
-  theme_pubr()
-ggplotly(p.phate)
-
-
-# Calculate Fv = V * S for the first two components
-Fv <- res_tsvd$v[, 1:2] %*% diag(res_tsvd$d[1:2])
-
-# Create a dataframe for Fv
-df_variants <- data.frame(PC1 = Fv[, 1], PC2 = Fv[, 2])
-
-# Create a dataframe for U (phenotypes) for the first two components
-df_phenotypes <- data.frame(PC1 = res_tsvd$u[, 1], 
-                            PC2 = res_tsvd$u[, 2])
-
-# Scatter plot for variants
-p <- ggplot(df_variants, aes(x = PC1, y = PC2)) +
-  geom_point(aes(color = 'Variant'), alpha = 0.5) +
-  scale_color_manual(values = c("Variant" = "blue"))
-
-# Add phenotype vectors as arrows
-p <- p + geom_segment(data = df_phenotypes, aes(x = 0, y = 0, xend = PC1, yend = PC2), arrow = arrow(type = "closed"), alpha = 0.5, color = "red") +
-  geom_text(data = df_phenotypes, aes(label = Phenotype, x = PC1, y = PC2), vjust = 1, hjust = 1)
-
-# Additional plot settings
-p <- p + labs(title = "Biplot of Variants and Phenotypes",
-              x = "Principal Component 1",
-              y = "Principal Component 2") +
-  theme_minimal()
-
-## Squared cosine scores
-
-# Extract U matrix and singular values
-U <- res_tsvd$u
-S <- diag(res_tsvd$d)
-
-# Compute squared cosine scores (a unit-normalized row of US)
-US <- U %*% S
-
-# Compute squared cosine scores for each trait
-squared_cosine_scores <- rowSums(US^2)
-normalized_US <- sweep(US, 1, sqrt(squared_cosine_scores), FUN="/")
-
-# Prepare data for plotting
-data_long <- as.data.frame(normalized_US^2)
-colnames(data_long) <- paste0("PC", 1:20)
-
-data_long <- gather(data_long, "PC", "Score")
-
-# Plot
-ggplot(data_long, aes(x=PC, y=Score, fill=PC)) +
-  geom_bar(stat="identity") +
-  ggtitle("Squared Cosine Scores for All Traits Across 20 Components") +
-  ylab("Score") +
-  xlab("Principal Component")
-
-## Phenotype projections in variant space
-
-# Extract matrices from tSVD results
-U <- res_tsvd$u # phenotypes
-V <- res_tsvd$v # variants
-
-# Generate phenotype vectors
-
-
-as.data.frame(V) %>%
-
-
-# Create data for phenotype vectors (selected phenotypes: e.g., 1, 2, 3)
-selected_phenotypes <- c(54, 22, 34)
-phenotype_data <- as.data.frame(U[selected_phenotypes, ])
-colnames(phenotype_data) <- c("PC1", "PC2")
-phenotype_data$Phenotype <- as.factor(selected_phenotypes)
-
-# Plot
-ggplot() +
-  geom_point(data = var_pca_data, aes(x = PC1, y = PC2), color = "blue") +
-  geom_segment(data = phenotype_data, aes(x = 0, y = 0, xend = PC1, yend = PC2), 
-               arrow = arrow(type = "closed", length = unit(0.2, "inches")), color = "red") +
-  geom_text(data = phenotype_data, aes(x = PC1, y = PC2, label = Phenotype), nudge_x = 0.1) +
-  ggtitle("First Two Principal Components of Variants with Phenotype Vectors") +
-  xlab("PC1") +
-  ylab("PC2")
-
-
-
-# 30 - ear shape / HMGA2
-
-# Component 02 - food sensitivity
-## lncRNA near Prdm8
-## DSCAML1
-## C1QTNF3
 
 
 # Plot variant and phenotype contributions
-calculate_contribution_scores <- function(U_matrix, V_matrix, i) {
-  # For phenotypes
-  cntrphe <- U_matrix[, i]^2
-  
-  # For variants
-  cntrvar <- V_matrix[, i]^2
-  
-  # Normalize scores so they sum to 1
-  cntrphe <- cntrphe / sum(cntrphe)
-  cntrvar <- cntrvar / sum(cntrvar)
-  
-  list(
-    phenotype_contribution = cntrphe,
-    phenotype_eigenvalue = U_matrix[, i],
-    variant_contribution = cntrvar,
-    variant_eigenvalue = V_matrix[, i]
-  )
-}
-
 con.phe.list = list()
 for (i in 1:n_comp){
   con.phe.list[[i]] = 
     bind_cols((phe %>% select(phe)),
-              data.frame(score=calculate_contribution_scores(res_tsvd$u, res_tsvd$v, i)$phenotype_contribution)) %>%
+              data.frame(score=calculate_contribution_scores(tsvd_result$u, tsvd_result$v, i)$phenotype_contribution)) %>%
     as.data.frame() %>%
     arrange(desc(score)) %>%
     head(5) %>%
@@ -252,9 +316,9 @@ for (i in 1:n_comp){
 }
 con.phe.list = rbindlist(con.phe.list)
 
-i = 10
+i = 19
 
-result = calculate_contribution_scores(res_tsvd$u, res_tsvd$v, i)
+result = calculate_contribution_scores(tsvd_result$u, tsvd_result$v, i)
 
 # Prepare phenotype data
 con.phe = bind_cols((phe %>% select(phe)),
@@ -283,6 +347,11 @@ con.var <- inner_join(con.var, data_cum, by = "chr") %>%
 
 # Add color for each chromosome based on a rainbow color palette
 chrom_colors <- rainbow(length(unique(con.var$chr)))
+con.var <- con.var %>%
+  mutate(color = chrom_colors[as.integer(chr)])
+
+# Add color for each chromosome based on a bicolor palette
+chrom_colors <- rep(x = c("#5FA29B","#2B555D"), length(unique(con.var$chr))/2)
 con.var <- con.var %>%
   mutate(color = chrom_colors[as.integer(chr)])
 
@@ -330,3 +399,27 @@ combined_plot <- p.con.var / p.con.phe
 # Show the plot
 combined_plot
 
+
+
+
+# Calculate all_scores_df using your previous functions
+U_matrix <- tsvd_result$u
+V_matrix <- tsvd_result$v
+n_comp <- dim(U_matrix)[2]
+
+all_scores_df <- NULL
+
+for (i in 1:n_comp) {
+  result <- calculate_contribution_scores(U_matrix, V_matrix, i)
+  
+  if (is.null(all_scores_df)) {
+    all_scores_df <- as.data.frame(result$variant_contribution)
+  } else {
+    all_scores_df <- bind_cols(all_scores_df, result$variant_contribution)
+  }
+}
+
+colnames(all_scores_df) <- paste("Comp", 1:n_comp, sep="_")
+
+# Run analyze_components
+analyze_components(all_scores_df, mat, n_comp)
