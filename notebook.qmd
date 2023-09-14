@@ -1,0 +1,659 @@
+---
+title: "Decoding canine behavior: Multivariate genomic analysis of latent phenotypes"
+author: "Kathleen Morrill Pirovich"
+date: 2023-09-10
+date_format: iso
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Prepare data
+
+### Load libraries
+
+```{r}
+#| echo: false
+library(tidyverse)
+library(data.table)
+library(BEDMatrix)
+library(genio)
+library(irlba)
+library(lavaan)
+library(GenomicRanges)
+library(BSgenome.Cfamiliaris.UCSC.canFam3)
+library(TxDb.Cfamiliaris.UCSC.canFam3.refGene)
+library(ggrepel)
+library(ggpubr)
+library(plotly)
+library(patchwork)
+library(lme4)
+library(broom.mixed)
+library(showtext)
+library(dplyr)
+
+pal = c("#EEE1CB", "#5FA29B", "#2B555D", "#FEAE03", "#E06545", "#769762", "#B95E79")
+
+font_add_google("Bodoni Moda", family="bodoni")
+font_add_google("Roboto Condensed", family="roboto")
+showtext_auto()
+```
+
+### Load summary-level GWAS data
+
+```{r}
+# Read in z-score matrix file
+mat = fread("final_z_matrix.csv")
+
+# Read in phenotype index file
+phe = read_csv("final_phe_info.csv")
+
+# Read in LD scores
+lds = fread("dat/DarwinsArk_gp-0.70_biallelic-snps_maf-0.001_geno-0.05_hwe-1e-20-midp-keep-fewhet_N-3465_ld-100-by-50-r2-0.8.ldscores.csv")
+```
+
+### Load individual-level genetic data
+
+```{r}
+# Read in PLINK data set
+gen = BEDMatrix("dat/DarwinsArk_gp-0.70_biallelic-snps_maf-0.001_geno-0.05_hwe-1e-20-midp-keep-fewhet_N-3465_ld-100-by-50-r2-0.8.bed")
+
+# Read in genetic relationship matrix (GRM)
+grm = read_grm("dat/DarwinsArk_gp-0.70_biallelic-snps_maf-0.001_geno-0.05_hwe-1e-20-midp-keep-fewhet_N-3465")
+```
+
+### Load survey data
+
+```{r}
+dog = read_csv("data_release/dat/DarwinsArk_20221120_dogs.csv")
+que = read_csv("data_release/dat/DarwinsArk_20221120_questions.csv")
+ans = read_csv("data_release/dat/DarwinsArk_20221120_answers.csv")
+
+items = que
+
+factors = data.frame(factor = seq(1,25),
+                     factor_name = c("Human Sociability",
+                                     "Food Selectivity",
+                                     "Motor Patterns",
+                                     "Repetition Frequency",
+                                     "Social Strategy",
+                                     "Biddability",
+                                     "Food Sensitivity",
+                                     "Proximity Seeking",
+                                     "Shared Diet",
+                                     "Remote Reliability",
+                                     "Controlled Diet",
+                                     "Healthy Weight",
+                                     "Inappropriate Eating",
+                                     "Dog Sociability",
+                                     "Repetition Severity",
+                                     "Food Solicitation",
+                                     "Stimulus Sensitivity",
+                                     "Arousal Level",
+                                     "Food Appetite",
+                                     "Attention Seeking",
+                                     "Physical Mobility",
+                                     "Agonistic Threshold",
+                                     "Engagement Outdoors",
+                                     "Separation Anxiety",
+                                     "Engagement at Home"))
+```
+
+### Save RData for sharing
+
+```{r}
+save.image("notebook.RData")
+```
+
+### Load RData to resume
+
+```{r}
+load("notebook.RData")
+```
+
+## Genetic covariance of phenotypes
+
+### Calculate genetic covariance matrix adjusted by LD score
+
+```{r}
+# Initialize covariance matrices
+cov_mat <- matrix(0, nrow = ncol(mat), ncol = ncol(mat))
+
+# Compute modified GWAS covariance
+for (i in 1:ncol(mat)) {
+  for (j in i:ncol(mat)) {
+    cov_value <- sum(lds$L2 * mat[, i] * mat[, j])
+    cov_mat[i, j] <- cov_value
+    cov_mat[j, i] <- cov_value
+  }
+}
+
+rownames(cov_mat) = phe$phe
+colnames(cov_mat) = phe$phe
+cov_mat_dt = as.data.frame(as.table(cov_mat)) 
+cov_mat_dt$Var1 <- factor(cov_mat_dt$Var1, levels = rownames(cov_mat))
+cov_mat_dt$Var2 <- factor(cov_mat_dt$Var2, levels = rev(rownames(cov_mat)))
+```
+
+### Plot genetic covariance between phenotypes
+
+```{r}
+p.cov = cov_mat_dt %>%
+  ggplot(aes(x = Var1, y = Var2)) +
+  geom_tile(aes(fill = Freq)) +
+  scale_size_continuous(range = c(1, 10)) +
+  scale_fill_gradient(low = pal[4], high = pal[2]) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_fixed(ratio = 1) +
+  theme_pubr() +
+  theme(legend.position = "none",
+        axis.text.x = element_blank(),
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        text = element_text(color = pal[3]),
+        axis.title = element_text(color = pal[3]),
+        axis.text = element_text(color = pal[3]),
+        axis.ticks = element_line(color = pal[3])) 
+ggsave()
+```
+
+## Finding latent components of phenotypes from GWA data
+
+### Prepare input data
+
+```{r}
+# Re-index phenotypes and extract information from file names
+phe$index = seq(1,nrow(phe))-1
+phe$phe_code = sub('.*phe-(.*?)_.*', '\\1', basename(phe$file))
+
+# Extract phenotype names from GWA file names
+phe = phe %>%
+  mutate(item = if_else(phe_code %like% "bq.",
+                        as.integer(round(parse_number(phe_code) * 1000)),
+                        NA_integer_,
+                        NA_integer_)) %>%
+  mutate(factor = if_else(phe_code %like% "fa.",
+                          as.integer(round(parse_number(phe_code) * 100)),
+                        NA_integer_,
+                        NA_integer_)) %>%
+  merge((items %>% select(id,string)), by.x = "item", by.y = "id", all.x = T) %>%
+  merge(factors, by = "factor", all.x = T)
+
+# Index factor GWA with only age covariates
+id_rm = phe %>% filter(file %like% "qcov-age.fa") %>% pull(index)
+
+# Index item GWA with quantitative scores
+id_rm = c(id_rm, (phe %>% filter(phe_code %like% "bq." & !phe_code %like% "mean-binary") %>% pull(index)))
+
+# Remove indexed GWA results
+phe = phe %>% arrange(index) %>% filter(!index %in% id_rm)
+
+phe = phe %>%
+  mutate(phe = if_else(!is.na(string),
+                       paste(string," (Q#",item,")",sep=""),
+                       if_else(!is.na(factor_name),
+                               paste(factor_name," (F#",factor,")", sep = ""),
+                               phe_code)))
+# Prepare variant, phenotype, and matrix data
+var = mat %>% select(chr=Chr, pos=bp, snp=SNP, ref=A2, alt=A1)
+diff = setdiff(as.character(phe$index), colnames(mat))
+mat = mat %>% select(any_of(as.character(phe$index)))
+phe = phe %>% filter(index != diff)
+
+mat = as.matrix(mat)
+mat[is.na(mat)] <- 0  # replacing NAs with 0
+mat[is.infinite(mat)] <- 0  # replacing Inf with 0
+
+n_phe = ncol(mat)
+n_var = nrow(mat)
+```
+
+### Run truncated singular value decomposition (tSVD) using irlba package
+
+```{r}
+# Run truncated singular value decomposition on n_var columns x n_phe rows (transpose)
+n_svd = 40
+tsvd_result <- irlba(t(mat), nv = n_svd)
+
+# Save tSVD results to file
+write_csv(as.data.frame(tsvd_result$d), "d_values.csv")
+write_csv(as.data.frame(tsvd_result$u), "u_values.csv")
+write_csv(as.data.frame(tsvd_result$v), "v_values.csv")
+```
+
+### Plot relative variance explained by each latent component
+
+```{r}
+p.scree = data.frame(S = tsvd_result$d,
+                     Index = 1:length(tsvd_result$d)) %>%
+  mutate(prop_variance = S^2 / sum(S^2)) %>%
+  ggplot(aes(x = Index, 
+             y = prop_variance)) +
+  geom_line(color = pal[3]) +
+  geom_point(color = pal[3], 
+             shape = 21, 
+             fill = pal[2], 
+             stroke = 1, 
+             size = 3) +
+  xlab("component index") +
+  ylab("proportion of variance explained") +
+  theme_pubr() +
+  theme(legend.position = "none",
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        text = element_text(color = pal[3]),
+        axis.title = element_text(color = pal[3]),
+        axis.text = element_text(color = pal[3]),
+        axis.ticks = element_line(color = pal[3])) 
+ggsave(filename = "plot.scree-plot.png",
+       plot = p.scree,
+       device = "png",
+       bg = "transparent", 
+       width = 6,
+       height = 5,
+       units = "in")
+p.scree
+```
+
+### Weighted random effects meta-analysis of GWA z-scores
+
+```{r}
+svd_gwa <- data.frame()
+
+for (i in 1:n_svd) {
+  
+  # Extract eigenvalues and component loadings
+  eigenvalue_i <- tsvd_result$d[i]
+  loading_i <- tsvd_result$u[, i]
+  
+  # Calculate weights for the weighted random effect model
+  weights_i <- loading_i * eigenvalue_i
+  
+  # Calculate meta z-score for all variants for component i
+  met_z <- rowSums(mat * weights_i) / sqrt(sum(weights_i^2))
+  
+  # Calculate meta p-value for all variants for component i
+  met_p <- 2 * (1 - pnorm(abs(met_z)))
+  
+  tmp_df <- data.frame(
+    svd = rep(i, length(met_z)),
+    chr = var$chr,
+    pos = var$pos,
+    ref = var$ref,
+    alt = var$alt,
+    snp = var$snp,
+    svd_var_con = tsvd_result$v[, i],
+    met_z = met_z,
+    met_p = met_p
+  )
+  
+  svd_gwa <- rbind(svd_gwa, tmp_df)
+}
+
+svd_gwa = svd_gwa %>%
+  group_by(svd) %>%
+  mutate(met_p_cor_BH = p.adjust(met_p, method = "BH"),
+         met_p_cor_BY = p.adjust(met_p, method = "BY"))
+```
+
+## Data for modeling
+
+We will prepare the following data for each latent component:
+
+1.  `mod_gen`, a matrix of genotypes for `n_dog` individuals x `n_var` variants.
+
+2.  `mod_phe`, a matrix of phenotypes for `n_dog` individuals x `n_phe` phenotypes.
+
+3.  `mod_weights_var`, a data frame of genetic variant information, including a column `weight` for weights derived from tSVD.
+
+4.  `mod_weights_phe`, a data frame of phenotype information, including a column `weight` for weights derived from tSVD.
+
+5.  `mod_vargwa_cov` and `mod_phegwa_cov`, the sampling and genetic covariance matrix derived from `mat`, a matrix of GWA z-scores for `n_var` variants x `n_phe` phenotypes, and `lds`, a data frame of LD scores for `n_var` variants.
+
+6.  `mod_grm_cov`, the sample covariance matrix derived from `grm`, a matrix of kinship values for `n_dog` individuals x `n_dog` individuals.
+
+7.  `mod_cov`, a data frame of covariates like `age`, `sex`, and `hgt` for `n_dog` individuals.
+
+### Select latent component to model
+
+Here, we will perform modeling one component at a time.
+
+```{r}
+i = 1
+```
+
+### Prioritize variants and phenotypes from tSVD components
+
+```{r}
+# Select threshold for variants and phenotypes to include
+top_n_var <- 1000 
+top_n_phe <- 20 
+
+# Calculate weights as proportion variance explained
+svd_weights = sqrt((tsvd_result$d)^2 / sum((tsvd_result$d)^2))
+
+# Pull phenotype and variant info
+mod_weights_var = var
+mod_weights_phe = phe
+
+# Index component
+mod_weights_var$svd = i
+mod_weights_phe$svd = i
+
+# Weight variant singular values by variance explained by components
+mod_weights_var$weight <- svd_weights[i] * tsvd_result$v[,i]
+
+# Weight phenotype singular values by variance explained by components
+mod_weights_phe$weight <- svd_weights[i] * tsvd_result$u[,i]
+
+# Sort by magnitude and select
+mod_weights_var =  mod_weights_var %>% 
+  arrange(-abs(weight)) %>% 
+  slice_head(n = top_n_var)
+
+mod_weights_phe = mod_weights_phe %>% 
+  filter(!phe %like% "F#") %>% 
+  arrange(-abs(weight)) %>%
+  slice_head(n = top_n_phe)
+
+# Set indices
+mod_weights_var = mod_weights_var %>%
+  mutate(i_var = row_number())
+
+mod_weights_phe = mod_weights_phe %>%
+  mutate(i_phe = row_number())
+```
+
+### Prepare genotype matrix for prioritized variants
+
+```{r}
+# Select indices from `gen` that match prioritized variants
+ind = match(mod_weights_var$snp, sapply(strsplit(colnames(gen), "_"), `[`, 1))
+
+# Remove NAs in case some SNPs are not found
+ind = ind[!is.na(ind)]
+
+# Filter genotype data by prioritized variants
+mod_gen = gen[, ind]
+
+# Set dog names
+rownames(mod_gen) = sapply(strsplit(rownames(mod_gen), "_"), `[`, 1)
+
+# Fill genotypes with 0 if NA
+mod_gen[is.na(mod_gen)] <- 0
+```
+
+### Prepare covariate data
+
+```{r}
+# Pull sex, height, weight, and age from dog table
+mod_cov = dog %>%
+  select(dog,sex,hgt=height_filled,wgt=weight_filled,age=age_group) %>%
+  merge((data.frame(dog = rownames(mod_gen),
+                    i_dog = 1:length(rownames(mod_gen)))),
+        by = "dog") %>%
+  arrange(i_dog)
+```
+
+### Prepare phenotype matrix for prioritized phenotypes
+
+```{r}
+# Pull prioritized items from questions table
+mod_phe = 
+  ans %>%
+  filter(dog %in% rownames(mod_gen)) %>%
+  merge((mod_weights_phe %>% select(item,phe,weight)),
+        by.x = "question",
+        by.y = "item") %>%
+  select(dog,question,answer) %>%
+  mutate(answer = as.numeric(answer)) %>%
+  complete(dog, question) %>%
+  group_by(question) %>%
+  mutate(mean_answer = mean(answer, na.rm = TRUE)) %>%
+  mutate(answer = if_else(is.na(answer),
+                          mean_answer,
+                          answer)) %>%
+  select(-mean_answer) %>%
+  pivot_wider(id_cols = "dog",
+              names_from = "question",
+              values_from = "answer") %>%
+  arrange(match(dog, rownames(mod_gen)))
+```
+
+### Unify dogs across genotype, phenotype, and covariate data
+
+```{r}
+# Remove dogs missing covariate data
+mod_gen = mod_gen[rownames(mod_gen) %in% mod_cov$dog,]
+
+# Remove dogs missing phenotype data
+mod_gen = mod_gen[rownames(mod_gen) %in% mod_phe$dog,]
+
+# Remove dogs not in mod_gen from mod_phe and mod_cov
+mod_phe = mod_phe %>% filter(dog %in% rownames(mod_gen))
+mod_cov = mod_cov %>% filter(dog %in% rownames(mod_gen))
+```
+
+### Store info and re-name variables
+
+```{r}
+# Save coded allele variant ID to mod_weights_var
+mod_weights_var$coded_allele = sapply(strsplit(colnames(mod_gen), "_"), `[`, 2)
+
+# Re-name cols as 'var' 1:i_var in mod_gen
+colnames(mod_gen) = paste("var", mod_weights_var$i_var, sep = "")
+
+# Re-name rows as 'dog' 1:i_dog in mod_gen
+rownames(mod_gen) = paste("dog", mod_cov$i_dog, sep = "")
+
+# Drop dog from mod_phe
+mod_phe = mod_phe %>% select(-dog)
+
+# Set mod_phe as matrix
+mod_phe = as.matrix(mod_phe)
+
+# Re-name rows as 'dog' 1:i_dog in mod_phe
+rownames(mod_phe) = paste("dog", mod_cov$i_dog, sep = "")
+
+# Re-name cols as 'phe' 1:i_phe in mod_phe
+colnames(mod_phe) = paste("phe", mod_weights_phe$i_phe, sep = "")
+```
+
+### Remove all missing data, re-index variables, and count
+
+```{r}
+nrow(mod_gen)
+ncol(mod_gen)
+
+nrow(mod_phe)
+ncol(mod_phe)
+
+nrow(mod_weights_phe)
+nrow(mod_weights_var)
+
+#mod_weights_phe = x
+#mod_phe = x
+
+#mod_cov = x
+
+#mod_gwa = x
+#mod_grm = x
+#mod_lds = x
+
+#mod_n_var = 
+#mod_n_phe = x
+#mod_n_dog = x
+```
+
+### Generate variant sampling and phenotype genetic covariance matrix from GWA
+
+```{r}
+# Subset GWA matrix
+mod_gwa = mat[(which(var$snp %in% mod_weights_var$snp)),(which(phe$phe %in% mod_weights_phe$phe))]
+
+# Initialize covariance matrices
+mod_vargwa_cov <- matrix(0, nrow = nrow(mod_gwa), ncol = nrow(mod_gwa))
+mod_phegwa_cov <- matrix(0, nrow = ncol(mod_gwa), ncol = ncol(mod_gwa))
+
+# Get the subset of LD scores matching the selected SNPs
+mod_lds <- lds$L2[which(lds$SNP %in% mod_weights_var$snp)]
+
+# Compute modified GWAS covariance
+for (i in 1:ncol(mod_gwa)) {
+  for (j in i:ncol(mod_gwa)) {
+    cov_value <- sum(mod_lds * mod_gwa[, i] * mod_gwa[, j])
+    mod_phegwa_cov[i, j] <- cov_value
+    mod_phegwa_cov[j, i] <- cov_value
+    
+    cov_value <- sum(mod_lds * t(mod_gwa)[, i] * t(mod_gwa)[, j])
+    mod_vargwa_cov[i, j] <- cov_value
+    mod_vargwa_cov[j, i] <- cov_value
+  }
+}
+```
+
+### Plot genetic covariance of phenotypes in latent component
+
+```{r}
+rownames(mod_phegwa_cov) = mod_weights_phe$phe
+colnames(mod_phegwa_cov) = mod_weights_phe$phe
+mod_phegwa_cov_dt = as.data.frame(as.table(mod_phegwa_cov)) 
+mod_phegwa_cov_dt$Var1 <- factor(mod_phegwa_cov_dt$Var1, levels = rownames(mod_phegwa_cov))
+mod_phegwa_cov_dt$Var2 <- factor(mod_phegwa_cov_dt$Var2, levels = rev(rownames(mod_phegwa_cov)))
+
+mod_phegwa_cov_dt %>%
+  ggplot(aes(x = Var1, y = Var2)) +
+  geom_tile(aes(fill = Freq)) +
+  scale_size_continuous(range = c(1, 10)) +
+  scale_fill_gradient(low = pal[2], high = pal[4]) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_fixed(ratio = 1) +
+  theme_pubr() +
+  theme(legend.position = "none",
+        axis.text.x = element_blank(),
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        text = element_text(color = pal[3]),
+        axis.title = element_text(color = pal[3]),
+        axis.text = element_text(color = pal[3]),
+        axis.ticks = element_line(color = pal[3])) 
+```
+
+### Generate dog covariance matrix
+
+```{r}
+mod_grm_cov = smooth(grm$kinship[rownames(grm$kinship) %in% mod_cov$dog, colnames(grm$kinship) %in% mod_cov$dog])
+```
+
+## Modeling latent components in individuals
+
+### Confirmatory factor analysis
+
+```{r}
+# Scale each phenotype value and genotype value by tSVD weights
+scaled_phe = sweep(mod_phe, 2, mod_weights_phe$weight, "*")
+scaled_var = sweep(mod_gen, 2, mod_weights_var$weight, "*")
+combined_data = data.frame(scaled_phe, scaled_var)
+
+# SEM model formula
+sem_formula = paste("# Latent variable definition\nlatent_var =~ ",
+                    paste(colnames(mod_gen), collapse = " + "),
+                    " + ",
+                    paste(colnames(mod_phe), collapse = " + "),
+                    sep = "")
+
+# Fit the SEM model
+fit = sem(sem_formula, data = combined_data)
+
+# Display the summary
+summary(fit)
+```
+
+```{r}
+for(i in 1:n_svd) {
+  # Select indices from `gen` that match prioritized variants
+  ind = match(prior_var[prior_var$svd == i,]$snp, 
+              sapply(strsplit(colnames(gen), "_"), `[`, 1))
+  
+  # Remove NAs in case some SNPs are not found
+  ind = ind[!is.na(ind)]
+
+  # Filter genotype data by prioritized variants
+  selected_gen <- gen[, ind]
+
+  # Combine selected genotypes, kinship, and selected phenotypes
+  combined_data <- data.frame(selected_gen, grm$kinship, selected_phe)
+}
+```
+
+### Define formula and run SEM using lavaan package
+
+```{r}
+i = 1
+
+
+
+sem_formula = paste(,
+                    sep = "\n")
+
+sem_formula <- function(var_names, phe_names, covariate_names){
+  # Measurement models for weighted latent variables
+  latent_var <- paste(paste("W_var*", var_names, collapse = " + "), " =~ f1")
+  latent_phe <- paste(paste("W_phe*", phe_names, collapse = " + "), " =~ f2")
+
+  # Regression and Covariance
+  regression_phe <- "f2 ~ c*theta*K*theta + c1*f1"
+  covariance <- "f1 ~~ theta*K*theta"
+  
+  # Covariates
+  covariates_var <- paste(paste("c_", covariate_names, "*", covariate_names, collapse = " + "), " ~ f1")
+  covariates_phe <- paste(paste("c_", covariate_names, "*", covariate_names, collapse = " + "), " ~ f2")
+
+  # Combine all parts
+  sem_formula <- paste(latent_var, latent_phe, regression_phe, covariance, covariates_var, covariates_phe, sep = "\n")
+  
+  return(sem_formula)
+}
+
+# Define names based on your matrices and data frames
+var_names <- colnames(sem_gen)
+phe_names <- colnames(sem_phe)
+covariate_names <- colnames(sem_cov)
+
+# Generate SEM formula
+sem_formula <- generate_sem_formula(var_names, phe_names, covariate_names)
+
+# Fit the SEM model (assuming `your_data_frame` contains all necessary columns)
+library(lavaan)
+fit <- sem(sem_formula, data=your_data_frame, fixed.x=FALSE, estimator="WLS")
+```
+
+# Miscellaneous
+
+```{r}
+# genotype matrix n_dog dogs x n_var variants
+nrow(gen)
+ncol(gen)
+
+# kinship matrix n_dog dogs x n_dog dogs
+nrow(grm$kinship)
+ncol(grm$kinship)
+
+# tSVD d vector n_svd components
+length(tsvd_result$d)
+
+# tSVD u matrix n_phe phenotypes x n_svd components
+nrow(tsvd_result$u)
+ncol(tsvd_result$u)
+
+# tSVD v matrix n_var variants x n_svd components
+nrow(tsvd_result$v)
+ncol(tsvd_result$v)
+
+# original GWA matrix of z-scores n_var variants x n_phe phenotypes
+nrow(mat)
+ncol(mat)
+```
