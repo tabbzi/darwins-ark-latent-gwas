@@ -27,6 +27,7 @@ library(ggpubr)
 library(ggtext)
 library(ggfittext)
 library(plotly)
+library(hexbin)
 library(patchwork)
 library(lme4)
 library(broom.mixed)
@@ -100,82 +101,22 @@ factors = data.frame(factor = seq(1,25),
                                      "Engagement at Home"))
 ```
 
+Fix questions to give short form names for labeling...
+
+```{r}
+que_short = read_csv("dat/DarwinsArk_20221120_questions_formatted.csv")
+```
+
 ### Save RData for sharing
 
 ```{r}
-save.image("notebook.RData")
+#save.image("notebook.RData")
 ```
 
 ### Load RData to resume
 
 ```{r}
-load("notebook.RData")
-```
-
-## Genetic covariance of all phenotypes
-
-### Calculate genetic covariance matrix adjusted by LD score
-
-```{r}
-# Vectorized function to calculate modified GWAS covariance
-vectorized_cov <- function(mat, lds) {
-  scaled_mat <- mat * sqrt(lds$L2)
-  return(scaled_mat %*% t(scaled_mat))
-}
-
-# Generate covariance matrix
-cov_mat <- vectorized_cov(t(mat), lds)
-
-# Add row and column names
-rownames(cov_mat) <- phe$phe
-colnames(cov_mat) <- phe$phe
-
-# Hierarchical clustering
-cov_mat = cov_mat[hclust(dist(cov_mat))$order,hclust(dist(cov_mat))$order]
-
-# Convert covariance to correlation matrix
-cor_mat = cov2cor(cov_mat)
-
-# Convert to data frame and set factors
-cor_mat_dt <- as.data.frame(as.table(cor_mat))
-cor_mat_dt$Var1 <- factor(cor_mat_dt$Var1, levels = rownames(cor_mat))
-cor_mat_dt$Var2 <- factor(cor_mat_dt$Var2, levels = rev(rownames(cor_mat)))
-```
-
-### Plot genetic correlations between all phenotypes
-
-```{r}
-p.cor = cor_mat_dt %>%
-  rename(`genetic correlation` = Freq) %>%
-  ggplot(aes(x = str_wrap(Var1, width=40), 
-             y = str_wrap(Var2, width=40))) +
-  geom_tile(aes(fill = `genetic correlation`)) +
-  scale_size_continuous(range = c(1, 10)) +
-  scale_fill_gradient(low = pal[4], high = pal[2]) +
-  theme_pubr() +
-  theme(axis.title = element_blank(),
-        axis.text.x = element_blank(),
-        axis.text.y = element_text(color = pal[3], size = 4),
-        panel.background = element_blank(),
-        plot.background = element_blank(),
-        text = element_text(color = pal[3]),
-        axis.ticks = element_line(color = pal[3]),
-        plot.margin = margin(1, 1, 1, 1, "cm")) 
-ggsave(filename = "p.gen-cor.pdf",
-       plot = p.cor,
-       device = "pdf",
-       units = "in",
-       height = 8.5,
-       width = 5)
-```
-
-```{r}
-fig = plot_ly(x = colnames(cor_mat), y = rownames(cor_mat), z = cor_mat, type = "heatmap") %>%
-  layout(title = "LD score regressed genetic correlation matrix",
-         xaxis = list(showticklabels = FALSE, showgrid = FALSE, zeroline = FALSE))
-fig
-htmlwidgets::saveWidget(fig, "interactive_heatmap.html")
-
+#load("notebook.RData")
 ```
 
 ## Finding latent components of phenotypes from GWA data
@@ -229,6 +170,120 @@ n_phe = ncol(mat)
 n_var = nrow(mat)
 ```
 
+Add in short form names...
+
+```{r}
+phe = phe %>% merge((que_short %>% select(item=`#`,short=Short)), by = "item", all.x = T)
+```
+
+### Calculate genetic covariance matrix adjusted by LD score
+
+```{r}
+# Vectorized function to calculate modified GWAS covariance
+vectorized_cov <- function(mat, lds) {
+  scaled_mat <- mat * sqrt(lds$L2)
+  return(scaled_mat %*% t(scaled_mat))
+}
+
+# Generate covariance matrix
+cov_mat <- vectorized_cov(t(mat), lds)
+
+# Add row and column names
+rownames(cov_mat) <- phe$phe
+colnames(cov_mat) <- phe$phe
+
+# Hierarchical clustering
+cov_mat = cov_mat[hclust(dist(cov_mat))$order,hclust(dist(cov_mat))$order]
+
+# Convert covariance to correlation matrix
+cor_mat = cov2cor(cov_mat)
+
+# Convert to data frame and set factors
+cor_mat_dt <- as.data.frame(as.table(cor_mat))
+cor_mat_dt$Var1 <- factor(cor_mat_dt$Var1, levels = rownames(cor_mat)[hclust(dist(cov_mat))$order])
+cor_mat_dt$Var2 <- factor(cor_mat_dt$Var2, levels = rev(rownames(cor_mat)[hclust(dist(cov_mat))$order]))
+
+# Get non-redundant long form
+cor_mat_dt_unique = data.frame(row = rownames(cor_mat)[which(upper.tri(cor_mat, diag = TRUE), arr.ind = TRUE)[, 1]], col = colnames(cor_mat)[which(upper.tri(cor_mat, diag = TRUE), arr.ind = TRUE)[, 2]], value = cor_mat[upper.tri(cor_mat, diag = TRUE)])
+```
+
+### Plot genetic correlations across all phenotypes
+
+```{r}
+p.cor = cor_mat_dt %>%
+  rename(`genetic correlation` = Freq) %>%
+  ggplot(aes(x = str_wrap(Var1, width=40), 
+             y = str_wrap(Var2, width=40))) +
+  geom_tile(color = NA, aes(fill = `genetic correlation`)) +
+  scale_size_continuous(range = c(1, 10)) +
+  scale_fill_gradient(low = pal[4], high = pal[2]) +
+  theme_pubr() +
+  theme(axis.title = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(color = pal[3], size = 4),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        text = element_text(color = pal[3]),
+        axis.ticks = element_line(color = pal[3]),
+        plot.margin = margin(1, 1, 1, 1, "cm")) 
+ggsave(filename = "p.gen-cor.pdf",
+       plot = p.cor,
+       device = "pdf",
+       units = "in",
+       height = 8.5,
+       width = 5)
+
+p.cor = cor_mat_dt %>%
+  rename(`genetic correlation` = Freq) %>%
+  ggplot(aes(x = str_wrap(Var1, width=40), 
+             y = str_wrap(Var2, width=40))) +
+  geom_tile(color = NA, aes(fill = `genetic correlation`)) +
+  scale_size_continuous(range = c(1, 10)) +
+  scale_fill_viridis_c(direction = 1) +
+  theme_pubr() +
+  theme(legend.position="none",
+        axis.title = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.line = element_line(color = pal[3]),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        text = element_text(color = pal[3]),
+        axis.ticks = element_line(color = pal[3])) 
+ggsave(filename = "p.gen-cor.png",
+       plot = p.cor,
+       device = "png",
+       units = "px",
+       height = 900,
+       width = 1700)
+```
+
+### View and save widget of genetic correlation interactive plot
+
+```{r}
+fig = plot_ly(x = colnames(cor_mat), y = rownames(cor_mat), z = cor_mat, type = "heatmap") %>%
+  layout(title = "LD score regressed genetic correlation matrix",
+         xaxis = list(showticklabels = FALSE, showgrid = FALSE, zeroline = FALSE))
+fig
+htmlwidgets::saveWidget(fig, "interactive_heatmap.html")
+
+pheatmap::pheatmap(cor_mat,
+                   show_rownames = F, 
+                   show_colnames = F, 
+                   color = viridis::viridis(256),
+                   cluster_rows = F, 
+                   cluster_cols = F, 
+                   legend = F,
+                   scale = "none",
+                   filename = "p.gen-cor.pheatmap.png",
+                   width = 9.5,
+                   height = 4.5)
+```
+
 ### Run truncated singular value decomposition (tSVD) using irlba package
 
 ```{r}
@@ -262,9 +317,10 @@ p.scree = data.frame(S = tsvd_result$d,
   theme(legend.position = "none",
         panel.background = element_blank(),
         plot.background = element_blank(),
-        text = element_text(color = pal[3]),
-        axis.title = element_text(color = pal[3]),
-        axis.text = element_text(color = pal[3]),
+        text = element_text(color = pal[3], size = 32),
+        axis.line = element_line(color = pal[3]),
+        axis.title = element_text(color = pal[3], size = 32),
+        axis.text = element_text(color = pal[3], size = 32),
         axis.ticks = element_line(color = pal[3])) 
 ggsave(filename = "plot.scree-plot.png",
        plot = p.scree,
@@ -279,6 +335,7 @@ p.scree
 ### Weighted random effects meta-analysis of GWA z-scores
 
 ```{r}
+#| eval: false
 svd_gwa <- data.frame()
 
 for (i in 1:n_svd) {
@@ -313,8 +370,218 @@ for (i in 1:n_svd) {
 
 svd_gwa = svd_gwa %>%
   group_by(svd) %>%
-  mutate(met_p_cor_BH = p.adjust(met_p, method = "BH"),
-         met_p_cor_BY = p.adjust(met_p, method = "BY"))
+  mutate(met_p_cor_fdr = p.adjust(met_p, method = "fdr"))
+```
+
+### Plot component GWA as manhattan plot
+
+```{r}
+i = 1
+
+svd_gwa_dtf = svd_gwa %>%
+  filter(svd == i) %>%
+  arrange(chr,pos) %>%
+  merge((svd_gwa %>%
+           filter(svd == i) %>%
+           group_by(chr) %>%
+           summarize(max.pos = max(as.numeric(pos))) %>%
+           mutate(pos.add = lag(cumsum(as.numeric(max.pos)), default = 0)) %>%
+           select(chr, pos.add)),
+        by = "chr", all.x = T) %>%
+  mutate(pos.cum = pos + pos.add) %>%
+  group_by(chr) %>%
+  mutate(center = mean(pos.cum)) %>%
+  mutate(color = if_else(chr %% 2 == 1,
+                         pal[2],
+                         pal[3])) %>%
+  mutate(label = if_else(met_p_cor_fdr < 0.05,
+                         snp,
+                         NA_character_))
+  
+p.svd_gwa = svd_gwa_dtf %>%
+  ggplot(aes(x = pos.cum,
+             y = -log10(met_p_cor_fdr),
+             color = color)) +
+  geom_point(alpha = 0.5) +
+  geom_text_repel(aes(label = label), color = pal[3], size = 8) +
+  scale_x_continuous(
+    breaks = unique(svd_gwa_dtf$center), 
+    labels = unique(svd_gwa_dtf$chr)) +
+  scale_color_identity() +
+  labs(x = "genomic position",
+       y = "-log<sub>10</sub>(p)") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    panel.grid = element_line(color = pal[2]),
+    panel.border = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.y = element_markdown(),
+    axis.text.x = element_text(angle = 60, size = 20, vjust = 0.5),
+    text = element_text(color = pal[3], size = 32),
+    axis.line = element_line(color = pal[3]),
+    axis.title = element_text(color = pal[3], size = 32),
+    axis.text = element_text(color = pal[3], size = 32),
+    axis.ticks = element_line(color = pal[3])
+  )
+
+ggsave(filename = paste("p.svd-gwa.i-", i, ".png", sep = ""),
+       plot = p.svd_gwa,
+       device = "png",
+       bg = "transparent", 
+       width = 9.5,
+       height = 4.5,
+       units = "in")
+```
+
+### Generate factor scores, contribution scores, and squared cosine scores
+
+Here, we generate factor scores that are equivalent to principal components in PCA, and measure how phenotypes and variants contribute to specific latent components. We also calculate two complementary metrics: contribution scores and squared cosine scores. These metrics quantify the importance of each phenotype, variant, and component. Note that these metrics may not align perfectly; for example, a phenotype's key component according to its squared cosine score may differ when evaluated by its contribution score. This is because the two metrics normalize different aspects of the data: one along rows (phenotypes and variants) and the other along columns (latent components).
+
+```{r}
+# Calculate factor scores -- equivalent to PCA -- for phenotypes and variants
+fac_phe = tsvd_result$u %*% diag(tsvd_result$d)
+fac_var = tsvd_result$v %*% diag(tsvd_result$d)
+
+# Calculate contribution scores for phenotypes and variants
+con_phe = rowSums(tsvd_result$u^2)
+con_var = rowSums(tsvd_result$v^2)
+
+# Calculate squared cosine scores for phenotypes
+cos_phe = sweep(fac_phe^2, 1, rowSums(fac_phe^2), FUN = "/")
+
+# Run squared cosine scoring for variants in batches
+cos_var <- matrix(0, nrow = nrow(fac_var), ncol = ncol(fac_var))
+batch_size <- 10000
+
+# Loop through batches
+for (i in seq(1, nrow(fac_var), by = batch_size)) {
+  idx <- i:min((i + batch_size - 1), nrow(fac_var))
+  batch <- fac_var[idx, , drop=FALSE]
+  rs <- rowSums(batch^2)
+  cos_var[idx, ] <- sweep(batch^2, 1, rs, FUN = "/")
+}
+
+# Check output row sums ~ 1
+rowSums(cos_phe)
+rowSums(cos_var)
+```
+
+### Plot principal components of phenotypes
+
+```{r}
+p.fac_phe = bind_cols(phe, as.data.frame(fac_phe)) %>%
+  ggplot() +
+  geom_point(aes(x = V1, y = V2),
+           shape = 1,
+           color = pal[5]) +
+  geom_text_repel(aes(x = V1,
+                      y = V2,
+                      label = short),
+                  box.padding = 0.5) +
+  coord_equal() +
+  theme_pubr() +
+  theme(legend.position = "none",
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        text = element_text(color = pal[3], size = 32),
+        axis.line = element_line(color = pal[3]),
+        axis.title = element_text(color = pal[3], size = 32),
+        axis.text = element_text(color = pal[3], size = 32),
+        axis.ticks = element_line(color = pal[3]))
+
+p.fac_phe
+```
+
+### Plot projection of phenotypes and variants onto principal components
+
+```{r}
+arrow_max_scale <- 2
+arrow_max <- max(abs(fac_var)) * arrow_max_scale
+
+p.fac_var <- ggplot() +
+  geom_hex(data = bind_cols(var, as.data.frame(fac_var)),
+           aes(x = V1, y = V2), bins = 50) +
+  geom_segment(data = as.data.frame(tsvd_result$u),
+               aes(x = 0, y = 0,
+                   xend = V1 * arrow_max, yend = V2 * arrow_max),
+               color = pal[3], 
+               linewidth = 0.25,
+               alpha = 0.5) +
+  scale_fill_viridis_c(direction = -1) +
+  coord_equal() +
+  theme_pubr() +
+  theme(legend.position = "none",
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        text = element_text(color = pal[3], size = 32),
+        axis.line = element_line(color = pal[3]),
+        axis.title = element_text(color = pal[3], size = 32),
+        axis.text = element_text(color = pal[3], size = 32),
+        axis.ticks = element_line(color = pal[3]))
+
+# Main plot for phenotypes
+p.fac_phe <- ggplot() +
+  geom_point(data = as.data.frame(fac_phe),
+           aes(x = V1, y = V2),
+           shape = 1,
+           color = pal[5]) +
+  coord_equal() +
+  theme_pubr() +
+  theme(legend.position = "none",
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        text = element_text(color = pal[3], size = 32),
+        axis.line = element_line(color = pal[3]),
+        axis.title = element_text(color = pal[3], size = 32),
+        axis.text = element_text(color = pal[3], size = 32),
+        axis.ticks = element_line(color = pal[3]))
+
+# Combine the two plots
+p.biplot <- p.fac_var + p.fac_phe + plot_layout(ncol = 2)
+
+ggsave(filename = "plot.bi-plot.png",
+       plot = p.biplot,
+       device = "png",
+       bg = "transparent", 
+       width = 8,
+       height = 5,
+       units = "in")
+```
+
+```{r}
+p.fac_var = ggplot() +
+  geom_hex(data = bind_cols(var, as.data.frame(fac_var)),
+           aes(x = V1, y = V2),
+           bins = 20) +
+  geom_segment(data = as.data.frame(tsvd_result$u[, 1:2]),
+               aes(x = 0, y = 0, 
+                   xend = V1 * max(abs(fac_var)), yend = V2 * max(abs(fac_var))),
+               arrow = arrow(type = "closed", 
+                             length = unit(0.2, "inches")), 
+               color = pal[5]) +
+  annotate("segment",
+           x = rep(0, nrow(tsvd_result$u)),
+           y = rep(0, nrow(tsvd_result$u)),
+           xend = tsvd_result$u[, 1],
+           yend = tsvd_result$u[, 2],
+           linetype = "dashed",
+           color = "black",
+           alpha = 0.5,
+           arrow = arrow(type = "open", length = unit(0, "inches")),
+           size = 0.5) +
+  theme_pubr() +
+  theme(legend.position = "none",
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        text = element_text(color = pal[3], size = 32),
+        axis.line = element_line(color = pal[3]),
+        axis.title = element_text(color = pal[3], size = 32),
+        axis.text = element_text(color = pal[3], size = 32),
+        axis.ticks = element_line(color = pal[3]))
 ```
 
 ## Prepare data for modeling
