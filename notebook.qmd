@@ -636,7 +636,7 @@ svd_var_scores %>%
 ### Define genomic ranges and annotations
 
 ```{r}
-gene_range_threshold = 500000
+gene_range_threshold = 250000
 
 vgr =  GRanges(
   seqnames = paste("chr", var$chr, sep = ""),
@@ -657,13 +657,17 @@ var_ann$gene_symbol = mapIds(org,
                              keys = var_ann$gene_id, 
                              column = "SYMBOL", 
                              keytype = "ENTREZID") 
+
+var_ann = var_ann %>%
+  group_by(snp) %>%
+  summarise(genes = paste(gene_symbol, collapse = ","))
 ```
 
 ### Merge onto variant scores
 
 ```{r}
 svd_var_scores = svd_var_scores %>%
-  merge((var_ann %>% dplyr::select(snp,gene_id,gene_symbol)), 
+  merge(var_ann, 
         by = "snp", 
         all.x = T) %>%
   arrange(svd,1/(con*cos))
