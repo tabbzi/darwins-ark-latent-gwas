@@ -340,7 +340,7 @@ svd_res_phe_behav = irlba(t(mat[,colnames(mat) %in% as.character(phe_behav$index
 ```{r}
 tsvd_result = svd_res_phe_behav
 tsvd_out = "svd-phe-behav"
-idx_phe = colnames(mat) %in% as.character(phe_behav$index)
+idx_phe = as.character(phe_behav$index)
 ```
 
 ### Plot relative variance explained by each latent component
@@ -422,7 +422,7 @@ for (i in seq(1, nrow(fac_var), by = batch_size)) {
 #### Plot phenotype factor scores for PC1 and PC2
 
 ```{r}
-p.fac_phe = bind_cols(phe[idx_phe,], as.data.frame(fac_phe)) %>%
+p.fac_phe = bind_cols(phe %>% filter(index %in% idx_phe), as.data.frame(fac_phe)) %>%
   ggplot() +
   geom_point(aes(x = V1, y = V2),
            shape = 1,
@@ -551,7 +551,7 @@ svd_var_scores = bind_cols((var[rep(seq_len(nrow(var)), times = ncol(fac_var)), 
 #### Summarize scores across phenotypes
 
 ```{r}
-svd_phe_scores = bind_cols((phe[idx_phe,][rep(seq_len(nrow(phe[idx_phe,])), times = ncol(fac_phe)), , drop = FALSE]),
+svd_phe_scores = bind_cols(((phe %>% filter(index %in% idx_phe))[rep(seq_len(nrow(phe[idx_phe,])), times = ncol(fac_phe)), , drop = FALSE]),
                            (as.data.frame(fac_phe) %>% 
   pivot_longer(everything(), names_to = "svd", values_to = "fac") %>%
   mutate(svd = as.integer(gsub("V", "", svd)))),
@@ -692,7 +692,7 @@ for (i in 1:n_svd) {
   # Loop through each SNP
   for (j in 1:n_var) {
     # Extract z-scores for SNP j across all phenotypes
-    z_scores = mat[j, idx_phe]
+    z_scores = mat[j, (colnames(mat) %in% idx_phe)]
     
     # Calculate within-study variances
     # within_var = rep(1, n_phe) # assuming Var(z) = 1
@@ -771,7 +771,7 @@ svd_phe_scores %>% group_by(svd) %>% arrange(-con) %>% slice_head(n=1) %>% mutat
 ```
 
 ```{r}
-i = 3
+i = 1
 
 p.svd_phe_con = svd_phe_scores %>% 
   filter(svd==i) %>% 
@@ -841,10 +841,10 @@ svd_gwa_rem_dtf = svd_gwa_rem %>%
   mutate(color = if_else(chr %% 2 == 1,
                          pal[2],
                          pal[3])) %>%
-  merge((var_ann %>% dplyr::select(snp,gene_symbol)), by = "snp", all.x = T) %>%
+  merge((var_ann %>% dplyr::select(snp,genes)), by = "snp", all.x = T) %>%
   mutate(lower_quartile_fdr = quantile(met_p_cor_fdr, 1e-5, na.rm = TRUE)) %>%
   mutate(label = if_else(met_p_cor_fdr < lower_quartile_fdr,
-                         paste(snp,gene_symbol),
+                         paste(snp,genes),
                          NA_character_))
 
 y_lim = max(-log10(svd_gwa_rem_dtf$met_p_cor_fdr[is.finite(-log10(svd_gwa_rem_dtf$met_p_cor_fdr))])) + 1
