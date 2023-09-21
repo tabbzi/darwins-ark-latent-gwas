@@ -19,9 +19,12 @@ library(BEDMatrix)
 library(genio)
 library(irlba)
 library(lavaan)
+library(moments)
 library(GenomicRanges)
+library(OrganismDbi)
 library(BSgenome.Cfamiliaris.UCSC.canFam3)
 library(TxDb.Cfamiliaris.UCSC.canFam3.refGene)
+library(org.Cf.eg.db)
 library(ggrepel)
 library(ggpubr)
 library(ggtext)
@@ -35,6 +38,9 @@ library(showtext)
 library(dplyr)
 
 pal = c("#EEE1CB", "#5FA29B", "#2B555D", "#FEAE03", "#E06545", "#769762", "#B95E79")
+bsg = BSgenome.Cfamiliaris.UCSC.canFam3
+txd = TxDb.Cfamiliaris.UCSC.canFam3.refGene
+org = org.Cf.eg.db
 
 font_add_google("Bodoni Moda", family="bodoni")
 font_add_google("Roboto Condensed", family="roboto")
@@ -163,11 +169,11 @@ mat = mat %>% select(any_of(as.character(phe$index)))
 phe = phe %>% filter(index != diff)
 
 mat = as.matrix(mat)
-mat[is.na(mat)] <- 0  # replacing NAs with 0
-mat[is.infinite(mat)] <- 0  # replacing Inf with 0
+mat[is.na(mat)] = 0  # replacing NAs with 0
+mat[is.infinite(mat)] = 0  # replacing Inf with 0
 
-n_phe = ncol(mat)
 n_var = nrow(mat)
+n_phe = ncol(mat)
 ```
 
 Add in short form names...
@@ -180,17 +186,17 @@ phe = phe %>% merge((que_short %>% select(item=`#`,short=Short)), by = "item", a
 
 ```{r}
 # Vectorized function to calculate modified GWAS covariance
-vectorized_cov <- function(mat, lds) {
-  scaled_mat <- mat * sqrt(lds$L2)
+vectorized_cov = function(mat, lds) {
+  scaled_mat = mat * sqrt(lds$L2)
   return(scaled_mat %*% t(scaled_mat))
 }
 
 # Generate covariance matrix
-cov_mat <- vectorized_cov(t(mat), lds)
+cov_mat = vectorized_cov(t(mat), lds)
 
 # Add row and column names
-rownames(cov_mat) <- phe$phe
-colnames(cov_mat) <- phe$phe
+rownames(cov_mat) = phe$phe
+colnames(cov_mat) = phe$phe
 
 # Hierarchical clustering
 cov_mat = cov_mat[hclust(dist(cov_mat))$order,hclust(dist(cov_mat))$order]
@@ -199,9 +205,9 @@ cov_mat = cov_mat[hclust(dist(cov_mat))$order,hclust(dist(cov_mat))$order]
 cor_mat = cov2cor(cov_mat)
 
 # Convert to data frame and set factors
-cor_mat_dt <- as.data.frame(as.table(cor_mat))
-cor_mat_dt$Var1 <- factor(cor_mat_dt$Var1, levels = rownames(cor_mat)[hclust(dist(cov_mat))$order])
-cor_mat_dt$Var2 <- factor(cor_mat_dt$Var2, levels = rev(rownames(cor_mat)[hclust(dist(cov_mat))$order]))
+cor_mat_dt = as.data.frame(as.table(cor_mat))
+cor_mat_dt$Var1 = factor(cor_mat_dt$Var1, levels = rownames(cor_mat)[hclust(dist(cov_mat))$order])
+cor_mat_dt$Var2 = factor(cor_mat_dt$Var2, levels = rev(rownames(cor_mat)[hclust(dist(cov_mat))$order]))
 
 # Get non-redundant long form
 cor_mat_dt_unique = data.frame(row = rownames(cor_mat)[which(upper.tri(cor_mat, diag = TRUE), arr.ind = TRUE)[, 1]], col = colnames(cor_mat)[which(upper.tri(cor_mat, diag = TRUE), arr.ind = TRUE)[, 2]], value = cor_mat[upper.tri(cor_mat, diag = TRUE)])
@@ -289,7 +295,7 @@ pheatmap::pheatmap(cor_mat,
 ```{r}
 # Run truncated singular value decomposition on n_var columns x n_phe rows (transpose)
 n_svd = 40
-tsvd_result <- irlba(t(mat), nv = n_svd)
+svd_res = irlba(t(mat), nv = n_svd)
 
 # Save tSVD results to file
 write_csv(as.data.frame(tsvd_result$d), "d_values.csv")
@@ -297,13 +303,53 @@ write_csv(as.data.frame(tsvd_result$u), "u_values.csv")
 write_csv(as.data.frame(tsvd_result$v), "v_values.csv")
 ```
 
+### Run tSVD on morphology and behavior phenotypes separately
+
+#### Detect noisy GWA results
+
+```{r}
+mat_stats <- data.frame(
+  phe = colnames(mat),
+  mean = colMeans(mat, na.rm = TRUE),
+  median = apply(mat, 2, median, na.rm = TRUE),
+  sd = apply(mat, 2, sd, na.rm = TRUE),
+  skewness = apply(mat, 2, skewness, na.rm = TRUE),
+  kurtosis = apply(mat, 2, kurtosis, na.rm = TRUE)
+) %>%
+  merge(phe, by.x = "phe", by.y = "index" ,all.x = T)
+```
+
+#### Select morphology and behavior phenotypes
+
+```{r}
+phe_morph = phe %>% filter(phe_code %like% "mq." | phe_code %like% "mp.")
+phe_behav = phe %>% filter(phe_code %like% "bq.")
+```
+
+#### Run tSVD on morphology and behavior phenotypes
+
+```{r}
+n_svd = 20
+
+#svd_res_phe_morph = irlba(t(mat[,colnames(mat) %in% phe_morph$index]), nv = n_svd)
+svd_res_phe_behav = irlba(t(mat[,colnames(mat) %in% as.character(phe_behav$index)]), nv = n_svd)
+```
+
+### Set which tSVD to run below
+
+```{r}
+tsvd_result = svd_res_phe_behav
+tsvd_out = "svd-phe-behav"
+idx_phe = colnames(mat) %in% as.character(phe_behav$index)
+```
+
 ### Plot relative variance explained by each latent component
 
 ```{r}
 p.scree = data.frame(S = tsvd_result$d,
-                     Index = 1:length(tsvd_result$d)) %>%
+                     index = 1:length(tsvd_result$d)) %>%
   mutate(prop_variance = S^2 / sum(S^2)) %>%
-  ggplot(aes(x = Index, 
+  ggplot(aes(x = index, 
              y = prop_variance)) +
   geom_line(color = pal[3]) +
   geom_point(color = pal[3], 
@@ -322,7 +368,7 @@ p.scree = data.frame(S = tsvd_result$d,
         axis.title = element_text(color = pal[3], size = 32),
         axis.text = element_text(color = pal[3], size = 32),
         axis.ticks = element_line(color = pal[3])) 
-ggsave(filename = "plot.scree-plot.png",
+ggsave(filename = paste("plot.",tsvd_out,".scree-plot.png", sep =" "),
        plot = p.scree,
        device = "png",
        bg = "transparent", 
@@ -332,112 +378,7 @@ ggsave(filename = "plot.scree-plot.png",
 p.scree
 ```
 
-### Weighted random effects meta-analysis of GWA z-scores
-
-```{r}
-#| eval: false
-svd_gwa <- data.frame()
-
-for (i in 1:n_svd) {
-  
-  # Extract eigenvalues and component loadings
-  eigenvalue_i <- tsvd_result$d[i]
-  loading_i <- tsvd_result$u[, i]
-  
-  # Calculate weights for the weighted random effect model
-  weights_i <- loading_i * eigenvalue_i
-  
-  # Calculate meta z-score for all variants for component i
-  met_z <- rowSums(mat * weights_i) / sqrt(sum(weights_i^2))
-  
-  # Calculate meta p-value for all variants for component i
-  met_p <- 2 * (1 - pnorm(abs(met_z)))
-  
-  tmp_df <- data.frame(
-    svd = rep(i, length(met_z)),
-    chr = var$chr,
-    pos = var$pos,
-    ref = var$ref,
-    alt = var$alt,
-    snp = var$snp,
-    svd_var_con = tsvd_result$v[, i],
-    met_z = met_z,
-    met_p = met_p
-  )
-  
-  svd_gwa <- rbind(svd_gwa, tmp_df)
-}
-
-svd_gwa = svd_gwa %>%
-  group_by(svd) %>%
-  mutate(met_p_cor_fdr = p.adjust(met_p, method = "fdr"))
-```
-
-### Plot component GWA as manhattan plot
-
-```{r}
-i = 1
-
-svd_gwa_dtf = svd_gwa %>%
-  filter(svd == i) %>%
-  arrange(chr,pos) %>%
-  merge((svd_gwa %>%
-           filter(svd == i) %>%
-           group_by(chr) %>%
-           summarize(max.pos = max(as.numeric(pos))) %>%
-           mutate(pos.add = lag(cumsum(as.numeric(max.pos)), default = 0)) %>%
-           select(chr, pos.add)),
-        by = "chr", all.x = T) %>%
-  mutate(pos.cum = pos + pos.add) %>%
-  group_by(chr) %>%
-  mutate(center = mean(pos.cum)) %>%
-  mutate(color = if_else(chr %% 2 == 1,
-                         pal[2],
-                         pal[3])) %>%
-  mutate(label = if_else(met_p_cor_fdr < 0.05,
-                         snp,
-                         NA_character_))
-  
-p.svd_gwa = svd_gwa_dtf %>%
-  ggplot(aes(x = pos.cum,
-             y = -log10(met_p_cor_fdr),
-             color = color)) +
-  geom_point(alpha = 0.5) +
-  geom_text_repel(aes(label = label), color = pal[3], size = 8) +
-  scale_x_continuous(
-    breaks = unique(svd_gwa_dtf$center), 
-    labels = unique(svd_gwa_dtf$chr)) +
-  scale_color_identity() +
-  labs(x = "genomic position",
-       y = "-log<sub>10</sub>(p)") +
-  theme_minimal() +
-  theme(
-    legend.position = "none",
-    panel.background = element_blank(),
-    plot.background = element_blank(),
-    panel.grid = element_line(color = pal[2]),
-    panel.border = element_blank(),
-    panel.grid.major.x = element_blank(),
-    panel.grid.minor.x = element_blank(),
-    axis.title.y = element_markdown(),
-    axis.text.x = element_text(angle = 60, size = 20, vjust = 0.5),
-    text = element_text(color = pal[3], size = 32),
-    axis.line = element_line(color = pal[3]),
-    axis.title = element_text(color = pal[3], size = 32),
-    axis.text = element_text(color = pal[3], size = 32),
-    axis.ticks = element_line(color = pal[3])
-  )
-
-ggsave(filename = paste("p.svd-gwa.i-", i, ".png", sep = ""),
-       plot = p.svd_gwa,
-       device = "png",
-       bg = "transparent", 
-       width = 9.5,
-       height = 4.5,
-       units = "in")
-```
-
-### Generate factor scores, contribution scores, and squared cosine scores
+### Scoring phenotypes and variants: factor, contribution, and squared cosine scores
 
 Here, we generate factor scores that are equivalent to principal components in PCA, and measure how phenotypes and variants contribute to specific latent components. We also calculate two complementary metrics: contribution scores and squared cosine scores. These metrics quantify the importance of each phenotype, variant, and component. Note that these metrics may not align perfectly; for example, a phenotype's key component according to its squared cosine score may differ when evaluated by its contribution score. This is because the two metrics normalize different aspects of the data: one along rows (phenotypes and variants) and the other along columns (latent components).
 
@@ -447,33 +388,41 @@ fac_phe = tsvd_result$u %*% diag(tsvd_result$d)
 fac_var = tsvd_result$v %*% diag(tsvd_result$d)
 
 # Calculate contribution scores for phenotypes and variants
-con_phe = rowSums(tsvd_result$u^2)
-con_var = rowSums(tsvd_result$v^2)
+con_phe = matrix(0, nrow(tsvd_result$u), ncol(tsvd_result$u))
+con_var = matrix(0, nrow(tsvd_result$v), ncol(tsvd_result$v))
+
+for (k in 1:ncol(tsvd_result$u)) {
+  con_phe[, k] = tsvd_result$u[, k]^2
+  con_phe[, k] = con_phe[, k] / sum(con_phe[, k])
+
+  con_var[, k] = tsvd_result$v[, k]^2
+  con_var[, k] = con_var[, k] / sum(con_var[, k])
+}
 
 # Calculate squared cosine scores for phenotypes
 cos_phe = sweep(fac_phe^2, 1, rowSums(fac_phe^2), FUN = "/")
 
 # Run squared cosine scoring for variants in batches
-cos_var <- matrix(0, nrow = nrow(fac_var), ncol = ncol(fac_var))
-batch_size <- 10000
+cos_var = matrix(0, nrow = nrow(fac_var), ncol = ncol(fac_var))
+batch_size = 10000
 
 # Loop through batches
 for (i in seq(1, nrow(fac_var), by = batch_size)) {
-  idx <- i:min((i + batch_size - 1), nrow(fac_var))
-  batch <- fac_var[idx, , drop=FALSE]
-  rs <- rowSums(batch^2)
-  cos_var[idx, ] <- sweep(batch^2, 1, rs, FUN = "/")
+  idx = i:min((i + batch_size - 1), nrow(fac_var))
+  batch = fac_var[idx, , drop=FALSE]
+  rs = rowSums(batch^2)
+  cos_var[idx, ] = sweep(batch^2, 1, rs, FUN = "/")
 }
 
 # Check output row sums ~ 1
-rowSums(cos_phe)
-rowSums(cos_var)
+# rowSums(cos_phe)
+# rowSums(cos_var)
 ```
 
-### Plot principal components of phenotypes
+#### Plot phenotype factor scores for PC1 and PC2
 
 ```{r}
-p.fac_phe = bind_cols(phe, as.data.frame(fac_phe)) %>%
+p.fac_phe = bind_cols(phe[idx_phe,], as.data.frame(fac_phe)) %>%
   ggplot() +
   geom_point(aes(x = V1, y = V2),
            shape = 1,
@@ -496,13 +445,13 @@ p.fac_phe = bind_cols(phe, as.data.frame(fac_phe)) %>%
 p.fac_phe
 ```
 
-### Plot projection of phenotypes and variants onto principal components
+#### Plot projection of phenotypes and variants onto principal components
 
 ```{r}
-arrow_max_scale <- 2
-arrow_max <- max(abs(fac_var)) * arrow_max_scale
+arrow_max_scale = 2
+arrow_max = max(abs(fac_var)) * arrow_max_scale
 
-p.fac_var <- ggplot() +
+p.fac_var = ggplot() +
   geom_hex(data = bind_cols(var, as.data.frame(fac_var)),
            aes(x = V1, y = V2), bins = 50) +
   geom_segment(data = as.data.frame(tsvd_result$u),
@@ -524,7 +473,7 @@ p.fac_var <- ggplot() +
         axis.ticks = element_line(color = pal[3]))
 
 # Main plot for phenotypes
-p.fac_phe <- ggplot() +
+p.fac_phe = ggplot() +
   geom_point(data = as.data.frame(fac_phe),
            aes(x = V1, y = V2),
            shape = 1,
@@ -541,7 +490,7 @@ p.fac_phe <- ggplot() +
         axis.ticks = element_line(color = pal[3]))
 
 # Combine the two plots
-p.biplot <- p.fac_var + p.fac_phe + plot_layout(ncol = 2)
+p.biplot = p.fac_var + p.fac_phe + plot_layout(ncol = 2)
 
 ggsave(filename = "plot.bi-plot.png",
        plot = p.biplot,
@@ -584,6 +533,448 @@ p.fac_var = ggplot() +
         axis.ticks = element_line(color = pal[3]))
 ```
 
+#### Summarize scores across variants
+
+```{r}
+svd_var_scores = bind_cols((var[rep(seq_len(nrow(var)), times = ncol(fac_var)), , drop = FALSE]),
+                           (as.data.frame(fac_var) %>% 
+  pivot_longer(everything(), names_to = "svd", values_to = "fac") %>%
+  mutate(svd = as.integer(gsub("V", "", svd)))),
+                       (as.data.frame(con_var) %>% 
+  pivot_longer(everything(), names_to = "svd", values_to = "con") %>%
+  select(-svd)),
+                       (as.data.frame(cos_var) %>% 
+  pivot_longer(everything(), names_to = "svd", values_to = "cos") %>%
+  select(-svd)))
+```
+
+#### Summarize scores across phenotypes
+
+```{r}
+svd_phe_scores = bind_cols((phe[idx_phe,][rep(seq_len(nrow(phe[idx_phe,])), times = ncol(fac_phe)), , drop = FALSE]),
+                           (as.data.frame(fac_phe) %>% 
+  pivot_longer(everything(), names_to = "svd", values_to = "fac") %>%
+  mutate(svd = as.integer(gsub("V", "", svd)))),
+                       (as.data.frame(con_phe) %>% 
+  pivot_longer(everything(), names_to = "svd", values_to = "con") %>%
+  select(-svd)),
+                       (as.data.frame(cos_phe) %>% 
+  pivot_longer(everything(), names_to = "svd", values_to = "cos") %>%
+  select(-svd)))
+
+```
+
+#### Plot phenotype scores
+
+```{r}
+i = 1
+
+svd_phe_scores %>% 
+  filter(svd==i) %>%
+  filter(abs(fac) >= quantile(abs(fac), 0.95),
+         abs(con) >= quantile(abs(con), 0.95),
+         abs(cos) >= quantile(abs(cos), 0.95))
+
+svd_phe_scores %>%
+  filter(svd == i) %>%
+  plot_ly(x = ~fac, y = ~con, z = ~cos,
+          type = 'scatter3d', mode = 'markers',
+          marker = list(size = 2, opacity = 0.6),
+          text = ~ifelse(is.na(short), as.character(phe), as.character(short))) %>%
+  add_trace(hoverinfo = "text") %>%
+  layout(scene = list(xaxis = list(title = 'Fac'),
+                      yaxis = list(title = 'Con'),
+                      zaxis = list(title = 'Cos')))
+
+```
+
+#### Plot variant scores
+
+```{r}
+i = 1
+
+svd_var_scores %>% 
+  filter(svd==i) %>%
+  filter(abs(fac) >= quantile(abs(fac), 0.95),
+         abs(con) >= quantile(abs(con), 0.95),
+         abs(cos) >= quantile(abs(cos), 0.95)) %>%
+  plot_ly(x = ~fac, y = ~con, z = ~cos,
+          type = 'scatter3d', mode = 'markers',
+          marker = list(size = 2, opacity = 0.6),
+          text = ~snp) %>%
+  add_trace(hoverinfo = "text") %>%
+  layout(scene = list(xaxis = list(title = 'Fac'),
+                      yaxis = list(title = 'Con'),
+                      zaxis = list(title = 'Cos')))
+```
+
+#### Plot contribution scores vs squared cosine scores
+
+```{r}
+i = 1
+svd_var_scores %>%
+  filter(svd == i) %>%
+  ggplot(aes(x = cos,
+             y = con)) +
+  geom_point(shape = 1,
+             color = pal[2]) +
+  labs(x = "squared cosine score",
+       y = "contribution score") +
+  theme_pubr() +
+  theme(legend.position = "none",
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        text = element_text(color = pal[3], size = 32),
+        axis.line = element_line(color = pal[3]),
+        axis.title = element_text(color = pal[3], size = 32),
+        axis.text = element_text(color = pal[3], size = 32),
+        axis.ticks = element_line(color = pal[3])) 
+```
+
+## Annotate genes within range of variants
+
+### Define genomic ranges and annotations
+
+```{r}
+gene_range_threshold = 500000
+
+vgr =  GRanges(
+  seqnames = paste("chr", var$chr, sep = ""),
+  ranges = IRanges(start = var$pos, end = var$pos),
+  snp = var$snp,
+  ref = var$ref,
+  alt = var$alt, 
+  seqinfo = seqinfo(bsg)
+)
+
+cds = cdsBy(txd, by = "gene")
+
+ovl = findOverlaps(vgr, cds + gene_range_threshold)
+
+var_ann = var[queryHits(ovl),]
+var_ann$gene_id = names(cds[subjectHits(ovl)])
+var_ann$gene_symbol = mapIds(org,
+                             keys = var_ann$gene_id, 
+                             column = "SYMBOL", 
+                             keytype = "ENTREZID") 
+```
+
+### Merge onto variant scores
+
+```{r}
+svd_var_scores = svd_var_scores %>%
+  merge((var_ann %>% dplyr::select(snp,gene_id,gene_symbol)), 
+        by = "snp", 
+        all.x = T) %>%
+  arrange(svd,1/(con*cos))
+```
+
+## Meta-analysis of GWAS
+
+### Random-effects meta-analysis of GWA z-scores
+
+In this analysis, we conduct a random-effects meta-analysis using genome-wide association z-scores. Each phenotype column in the GWA z-score matrix (variant x phenotype) is element-wise multiplied by its respective contribution score vector. Similarly, the same operation is performed for each variant row using the variant's contribution score. Unlike fixed-effects models, we additionally estimate between-study (or between-phenotype) variance, often denoted as tau-squared, to account for heterogeneity across phenotypes. We then calculate new weights that incorporate both within- and between-study variances. The sum of each row, weighted by these new random-effects weights, provides the meta z-score for each variant. Meta p-values are subsequently derived from the absolute meta z-scores and are corrected for multiple testing using the Benjamini & Hochberg false discovery rate (FDR) method. This approach allows for a more nuanced incorporation of each tSVD component's influence in the meta-analysis.
+
+```{r}
+# fixed
+svd_gwa_rem = data.frame()
+
+# For each component i
+for (i in 1:n_svd) {
+  # Initial placeholders for random-effects meta-z and meta-var
+  met_z = numeric(n_var)
+  met_var = numeric(n_var)
+  
+  # Loop through each SNP
+  for (j in 1:n_var) {
+    # Extract z-scores for SNP j across all phenotypes
+    z_scores = mat[j, idx_phe]
+    
+    # Calculate within-study variances
+    # within_var = rep(1, n_phe) # assuming Var(z) = 1
+    within_var =
+    
+    # DerSimonian-Laird estimator for tau-squared
+    tau2 = max(0, (sum(con_phe[, i] * con_var[j, i] * z_scores^2) - n_phe) / (sum(con_phe[, i] * con_var[j, i]) - n_phe))
+    
+    # Calculate random-effects weights
+    rand_weights = con_phe[, i] * con_var[j, i] / (within_var + tau2)
+    
+    # Calculate random-effects meta-z and meta-variance
+    met_z[j] = sum(rand_weights * z_scores) / sqrt(sum(rand_weights^2))
+    met_var[j] = 1 / sum(rand_weights^2)
+  }
+
+    tmp_df = data.frame(
+    svd = rep(i, length(met_z)),
+    chr = var$chr,
+    pos = var$pos,
+    ref = var$ref,
+    alt = var$alt,
+    snp = var$snp,
+    svd_var_cos = cos_var[, i],
+    svd_var_con = con_var[, i],
+    met_z = met_z,
+    met_var = met_var
+  )
+  
+  svd_gwa_rem = rbind(svd_gwa_rem, tmp_df)
+}
+
+svd_gwa_rem = svd_gwa_rem %>% 
+  group_by(svd) %>% 
+  mutate(met_p = 2 * (1 - pnorm(abs(met_z)))) %>%
+  mutate(met_p_cor_fdr = p.adjust(met_p, method = "fdr"))
+
+```
+
+#### Plot distributions of meta z-scores and variances
+
+```{r}
+svd_gwa_rem %>%
+  ggplot(aes(x = met_z)) +
+  geom_density() +
+  facet_wrap(~svd)
+
+svd_gwa_rem %>%
+  ggplot(aes(x = met_var)) +
+  geom_density() +
+  facet_wrap(~svd)
+
+svd_gwa_rem %>% 
+  filter(svd==1) %>% 
+  ggplot(aes(x = svd_var_cos,
+             y = met_z)) +
+  geom_point(shape = 1,
+             color = pal[2]) +
+  labs(x = "variant contribution\n(squared cosine score)") +
+  theme_pubr() +
+  theme(legend.position = "none",
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        text = element_text(color = pal[3], size = 32),
+        axis.line = element_line(color = pal[3]),
+        axis.title = element_text(color = pal[3], size = 32),
+        axis.text = element_text(color = pal[3], size = 32),
+        axis.ticks = element_line(color = pal[3])) 
+```
+
+#### Plot REMA GWA for tSVD component as Manhattan plot
+
+```{r}
+svd_phe_scores %>% group_by(svd) %>% arrange(-con) %>% slice_head(n=1) %>% mutate(label = ifelse(is.na(short), as.character(phe), as.character(short))) %>%
+  dplyr::select(label,svd,con)
+```
+
+```{r}
+i = 3
+
+p.svd_phe_con = svd_phe_scores %>% 
+  filter(svd==i) %>% 
+  arrange(-con) %>% 
+  mutate(label = ifelse(is.na(short), as.character(phe), as.character(short))) %>%
+  dplyr::select(label,con) %>% 
+  head(n=15) %>%
+  ggplot(aes(x = reorder(label, rank),
+             y = con)) +
+  geom_segment(
+    aes(x=label, xend=label, y=0, yend=con), 
+    color=pal[5], 
+    size=1.3
+  ) +
+  geom_point(
+    aes(x=label, y=con),
+    color=pal[5], 
+    size=5
+  ) +
+  coord_flip(clip = "off") +
+  theme(
+    legend.position="none"
+  ) + 
+  scale_y_continuous(expand = c(0,0)) +
+  labs(x = "phenotype",
+       y = "contribution score") +
+  theme_pubr() +
+  theme(
+    legend.position = "none",
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    panel.grid = element_line(color = pal[2]),
+    panel.border = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text = element_markdown(color = pal[3], size = 32),
+    axis.text.x = element_markdown(angle = 60, size = 20, vjust = 0.5),
+    text = element_text(color = pal[3], size = 32),
+    axis.line = element_line(color = pal[3]),
+    axis.title.x = element_markdown(color = pal[3], size = 32),
+    axis.title.y = element_markdown(color = pal[3], size = 32),
+    axis.ticks = element_line(color = pal[3]),
+    plot.margin = margin(1, 44, 1, 0)
+  )
+
+ggsave(filename = paste("p.",tsvd_out,".svd_phe_con.i-", i, ".png", sep = ""),
+       plot = p.svd_phe_con,
+       device = "png",
+       bg = "transparent", 
+       width = 4,
+       height = 4,
+       units = "in")
+
+svd_gwa_rem_dtf = svd_gwa_rem %>%
+  filter(svd == i) %>%
+  arrange(chr,pos) %>%
+  merge((svd_gwa_rem %>%
+           filter(svd == i) %>%
+           group_by(chr) %>%
+           dplyr::summarize(max.pos = max(as.numeric(pos))) %>%
+           mutate(pos.add = lag(cumsum(as.numeric(max.pos)), default = 0)) %>%
+           dplyr::select(chr, pos.add)),
+        by = "chr", all.x = T) %>%
+  mutate(pos.cum = pos + pos.add) %>%
+  group_by(chr) %>%
+  mutate(center = mean(pos.cum)) %>%
+  mutate(color = if_else(chr %% 2 == 1,
+                         pal[2],
+                         pal[3])) %>%
+  merge((var_ann %>% dplyr::select(snp,gene_symbol)), by = "snp", all.x = T) %>%
+  mutate(lower_quartile_fdr = quantile(met_p_cor_fdr, 1e-5, na.rm = TRUE)) %>%
+  mutate(label = if_else(met_p_cor_fdr < lower_quartile_fdr,
+                         paste(snp,gene_symbol),
+                         NA_character_))
+
+y_lim = max(-log10(svd_gwa_rem_dtf$met_p_cor_fdr[is.finite(-log10(svd_gwa_rem_dtf$met_p_cor_fdr))])) + 1
+  
+p.svd_gwa_rem = svd_gwa_rem_dtf %>%
+  filter(!is.infinite(-log10(met_p_cor_fdr))) %>%
+  ggplot(aes(x = pos.cum,
+             y = -log10(met_p_cor_fdr),
+             color = color)) +
+  geom_point(alpha = 0.5) +
+  geom_text_repel(aes(label = label), color = pal[3], box.padding = 0.5, size = 8) +
+  coord_cartesian(clip = "on") +
+  scale_x_continuous(
+    breaks = unique(svd_gwa_rem_dtf$center), 
+    labels = unique(svd_gwa_rem_dtf$chr),
+    expand = c(0,0)) +
+  scale_color_identity() +
+  scale_y_continuous(limits = c(0,y_lim), expand = c(0,0)) +
+  labs(x = "genomic position",
+       y = "-log<sub>10</sub>(p)",
+       caption = "contribution-weighted random-effects meta-analysis of GWA z-scores") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    panel.grid = element_line(color = pal[2]),
+    panel.border = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.y = element_markdown(),
+    axis.text.x = element_text(angle = 60, size = 20, vjust = 0.5),
+    text = element_text(color = pal[3], size = 32),
+    axis.line = element_line(color = pal[3]),
+    axis.title = element_text(color = pal[3], size = 32),
+    axis.text = element_text(color = pal[3], size = 32),
+    axis.ticks = element_line(color = pal[3])
+  )
+
+ggsave(filename = paste("p.",tsvd_out,".svd_gwa_rem.i-", i, ".png", sep = ""),
+       plot = p.svd_gwa_rem,
+       device = "png",
+       bg = "transparent", 
+       width = 9.5,
+       height = 4.5,
+       units = "in")
+```
+
+z-scores instead:
+
+```{r}
+i = 1
+
+svd_gwa_rem_dtf = svd_gwa_rem %>%
+  filter(svd == i) %>%
+  arrange(chr,pos) %>%
+  merge((svd_gwa_rem %>%
+           dplyr::filter(svd == i) %>%
+           group_by(chr) %>%
+           dplyr::summarize(max.pos = max(as.numeric(pos))) %>%
+           mutate(pos.add = lag(cumsum(as.numeric(max.pos)), default = 0)) %>%
+           dplyr::select(chr, pos.add)),
+        by = "chr", all.x = T) %>%
+  mutate(pos.cum = pos + pos.add) %>%
+  group_by(chr) %>%
+  mutate(center = mean(pos.cum)) %>%
+  mutate(color = if_else(chr %% 2 == 1,
+                         pal[2],
+                         pal[3])) %>%
+  merge((var_ann %>% dplyr::select(snp,gene_symbol)),
+        by = "snp",
+        all.x = T) %>%
+    mutate(label = if_else(met_p_cor_fdr < 0.05,
+                         paste(snp,gene_symbol),
+                         NA_character_))
+  
+p.svd_gwa_rem = svd_gwa_rem_dtf %>%
+  ggplot(aes(x = pos.cum,
+             y = -log10(met_p_cor_fdr),
+             color = color)) +
+  geom_point(alpha = 0.5) +
+  geom_text_repel(aes(label = label), color = pal[3], size = 8) +
+  scale_x_continuous(
+    breaks = unique(svd_gwa_rem_dtf$center), 
+    labels = unique(svd_gwa_rem_dtf$chr)) +
+  scale_color_identity() +
+  labs(x = "genomic position",
+       y = "-log<sub>10</sub>(p)") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    panel.grid = element_line(color = pal[2]),
+    panel.border = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.y = element_markdown(),
+    axis.text.x = element_text(angle = 60, size = 20, vjust = 0.5),
+    text = element_text(color = pal[3], size = 32),
+    axis.line = element_line(color = pal[3]),
+    axis.title = element_text(color = pal[3], size = 32),
+    axis.text = element_text(color = pal[3], size = 32),
+    axis.ticks = element_line(color = pal[3])
+  )
+
+ggsave(filename = paste("p.svd_gwa_rem.i-", i, ".png", sep = ""),
+       plot = p.svd_gwa_rem,
+       device = "png",
+       bg = "transparent", 
+       width = 9.5,
+       height = 4.5,
+       units = "in")
+```
+
+#### Plot z-scores of top variant across REMA GWA
+
+```{r}
+i = 1
+
+bind_cols(phe, data.frame(z=mat[which(var$snp == (svd_gwa_fem %>% 
+  filter(svd==i) %>% 
+  arrange(met_p_cor_fdr) %>% 
+  slice_head(n=1) %>% 
+  pull(snp))),])) %>%
+  arrange(-abs(z)) %>%
+  select(phe,short,z)
+
+bind_cols(phe, data.frame(z=mat[which(var$snp == "26:35723572:G:A"),])) %>%
+  arrange(-abs(z)) %>%
+  select(phe,short,z) %>%
+  View()
+```
+
 ## Prepare data for modeling
 
 We will prepare the following data for each latent component:
@@ -614,8 +1005,8 @@ i = 1
 
 ```{r}
 # Select threshold for variants and phenotypes to include
-top_n_var <- 10000 
-top_n_phe <- 50 
+top_n_var = 10000 
+top_n_phe = 50 
 
 # Calculate weights as proportion variance explained
 svd_weights = sqrt((tsvd_result$d)^2 / sum((tsvd_result$d)^2))
@@ -629,10 +1020,10 @@ mod_weights_var$svd = i
 mod_weights_phe$svd = i
 
 # Weight variant singular values by variance explained by components
-mod_weights_var$weight <- svd_weights[i] * tsvd_result$v[,i]
+mod_weights_var$weight = svd_weights[i] * tsvd_result$v[,i]
 
 # Weight phenotype singular values by variance explained by components
-mod_weights_phe$weight <- svd_weights[i] * tsvd_result$u[,i]
+mod_weights_phe$weight = svd_weights[i] * tsvd_result$u[,i]
 
 # Sort by magnitude and select
 mod_weights_var =  mod_weights_var %>% 
@@ -667,7 +1058,7 @@ mod_gen = gen[, ind]
 rownames(mod_gen) = sapply(strsplit(rownames(mod_gen), "_"), `[`, 1)
 
 # Fill genotypes with 0 if NA
-mod_gen[is.na(mod_gen)] <- 0
+mod_gen[is.na(mod_gen)] = 0
 ```
 
 ### Prepare covariate data
@@ -741,60 +1132,29 @@ mod_phe = as.matrix(mod_phe)
 
 # Re-name rows as 'dog' 1:i_dog in mod_phe
 rownames(mod_phe) = paste("dog", mod_cov$i_dog, sep = "")
-
-# Re-name cols as 'phe' 1:i_phe in mod_weights_phe
-# colnames(mod_phe) = paste("phe", mod_weights_phe$i_phe, sep = "")
-# need to adjust for phenotypes not in raw survey data
-```
-
-### Remove all missing data, re-index variables, and count
-
-```{r}
-nrow(mod_gen)
-ncol(mod_gen)
-
-nrow(mod_phe)
-ncol(mod_phe)
-
-nrow(mod_weights_phe)
-nrow(mod_weights_var)
-
-#mod_weights_phe = x
-#mod_phe = x
-
-#mod_cov = x
-
-#mod_gwa = x
-#mod_grm = x
-#mod_lds = x
-
-#mod_n_var = 
-#mod_n_phe = x
-#mod_n_dog = x
 ```
 
 ### Calculate genetic covariance matrix adjusted by LD score
 
 ```{r}
 # Vectorized function to calculate modified GWAS covariance
-vectorized_cov <- function(mat, lds) {
-  scaled_mat <- mat * sqrt(lds$L2)
+vectorized_cov = function(mat, lds) {
+  scaled_mat = mat * sqrt(lds$L2)
   return(scaled_mat %*% t(scaled_mat))
 }
 
 # Subset GWA matrix
-#mod_gwa = mat[(which(var$snp %in% mod_weights_var$snp)),(which(phe$phe %in% mod_weights_phe$phe))]
-mod_gwa = mat[,(which(phe$phe %in% mod_weights_phe$phe))] # all SNPs
+mod_gwa = mat[,(which(phe$phe %in% mod_weights_phe$phe))]
 
 # Subset LD scores
 mod_lds = lds %>% filter(SNP %in% mod_weights_var$snp)
 
 # Generate covariance matrix
-cov_mat <- vectorized_cov(t(mod_gwa), mod_lds)
+cov_mat = vectorized_cov(t(mod_gwa), mod_lds)
 
 # Add row and column names
-rownames(cov_mat) <- mod_weights_phe$phe
-colnames(cov_mat) <- mod_weights_phe$phe
+rownames(cov_mat) = mod_weights_phe$phe
+colnames(cov_mat) = mod_weights_phe$phe
 
 # Hierarchical clustering
 cov_mat = cov_mat[hclust(dist(cov_mat))$order,hclust(dist(cov_mat))$order]
@@ -803,12 +1163,14 @@ cov_mat = cov_mat[hclust(dist(cov_mat))$order,hclust(dist(cov_mat))$order]
 cor_mat = cov2cor(cov_mat)
 
 # Convert to data frame and set factors
-cor_mat_dt <- as.data.frame(as.table(cor_mat))
-cor_mat_dt$Var1 <- factor(cor_mat_dt$Var1, levels = rownames(cor_mat))
-cor_mat_dt$Var2 <- factor(cor_mat_dt$Var2, levels = rev(rownames(cor_mat)))
+cor_mat_dt = as.data.frame(as.table(cor_mat))
+cor_mat_dt$Var1 = factor(cor_mat_dt$Var1, levels = rownames(cor_mat))
+cor_mat_dt$Var2 = factor(cor_mat_dt$Var2, levels = rev(rownames(cor_mat)))
 ```
 
-### Plot genetic correlations of phenotypes in latent component
+### MOVE! Plot genetic correlations of phenotypes in latent component
+
+move to contribute score + meta GWA plotting part
 
 ```{r}
 p.cov = cor_mat_dt %>%
@@ -833,12 +1195,6 @@ ggsave(filename = paste("p.gen-cov.component-", i, ".pdf", sep = ""),
        units = "in",
        height = 8.5,
        width = 5)
-```
-
-### Generate dog covariance matrix
-
-```{r}
-mod_grm_cov = smooth(grm$kinship[rownames(grm$kinship) %in% mod_cov$dog, colnames(grm$kinship) %in% mod_cov$dog])
 ```
 
 ## Modeling latent components in individuals
@@ -875,10 +1231,10 @@ for(i in 1:n_svd) {
   ind = ind[!is.na(ind)]
 
   # Filter genotype data by prioritized variants
-  selected_gen <- gen[, ind]
+  selected_gen = gen[, ind]
 
   # Combine selected genotypes, kinship, and selected phenotypes
-  combined_data <- data.frame(selected_gen, grm$kinship, selected_phe)
+  combined_data = data.frame(selected_gen, grm$kinship, selected_phe)
 }
 ```
 
@@ -892,39 +1248,39 @@ i = 1
 sem_formula = paste(,
                     sep = "\n")
 
-sem_formula <- function(var_names, phe_names, covariate_names){
+sem_formula = function(var_names, phe_names, covariate_names){
   # Measurement models for weighted latent variables
-  latent_var <- paste(paste("W_var*", var_names, collapse = " + "), " =~ f1")
-  latent_phe <- paste(paste("W_phe*", phe_names, collapse = " + "), " =~ f2")
+  latent_var = paste(paste("W_var*", var_names, collapse = " + "), " =~ f1")
+  latent_phe = paste(paste("W_phe*", phe_names, collapse = " + "), " =~ f2")
 
   # Regression and Covariance
-  regression_phe <- "f2 ~ c*theta*K*theta + c1*f1"
-  covariance <- "f1 ~~ theta*K*theta"
+  regression_phe = "f2 ~ c*theta*K*theta + c1*f1"
+  covariance = "f1 ~~ theta*K*theta"
   
   # Covariates
-  covariates_var <- paste(paste("c_", covariate_names, "*", covariate_names, collapse = " + "), " ~ f1")
-  covariates_phe <- paste(paste("c_", covariate_names, "*", covariate_names, collapse = " + "), " ~ f2")
+  covariates_var = paste(paste("c_", covariate_names, "*", covariate_names, collapse = " + "), " ~ f1")
+  covariates_phe = paste(paste("c_", covariate_names, "*", covariate_names, collapse = " + "), " ~ f2")
 
   # Combine all parts
-  sem_formula <- paste(latent_var, latent_phe, regression_phe, covariance, covariates_var, covariates_phe, sep = "\n")
+  sem_formula = paste(latent_var, latent_phe, regression_phe, covariance, covariates_var, covariates_phe, sep = "\n")
   
   return(sem_formula)
 }
 
 # Define names based on your matrices and data frames
-var_names <- colnames(sem_gen)
-phe_names <- colnames(sem_phe)
-covariate_names <- colnames(sem_cov)
+var_names = colnames(sem_gen)
+phe_names = colnames(sem_phe)
+covariate_names = colnames(sem_cov)
 
 # Generate SEM formula
-sem_formula <- generate_sem_formula(var_names, phe_names, covariate_names)
+sem_formula = generate_sem_formula(var_names, phe_names, covariate_names)
 
 # Fit the SEM model (assuming `your_data_frame` contains all necessary columns)
 library(lavaan)
-fit <- sem(sem_formula, data=your_data_frame, fixed.x=FALSE, estimator="WLS")
+fit = sem(sem_formula, data=your_data_frame, fixed.x=FALSE, estimator="WLS")
 ```
 
-# Miscellaneous
+# Summary Statistics
 
 ```{r}
 # genotype matrix n_dog dogs x n_var variants
@@ -949,4 +1305,152 @@ ncol(tsvd_result$v)
 # original GWA matrix of z-scores n_var variants x n_phe phenotypes
 nrow(mat)
 ncol(mat)
+```
+
+# Withdrawn Code
+
+The following code needs refactoring or repair:
+
+### Fixed-effects meta-analysis of GWA z-scores (FEMA)
+
+In this analysis, we execute a fixed-effects meta-analysis using genome-wide association z-scores. Each phenotype column in the GWA z-score matrix (variant x phenotype) is element-wise multiplied by its corresponding squared cosine score vector. The same operation is performed for each variant row using the variant's squared cosine score. The sum of each row post these multiplications yields the meta z-score for each variant. Subsequently, the meta p-values are calculated based on the absolute meta z-scores. These meta p-values are then corrected for multiple testing using the Benjamini & Hochberg false discovery rate (FDR) method. This workflow allows for incorporation of each tSVD component's influence in the meta-analysis.
+
+```{r}
+svd_gwa_fem = data.frame()
+
+for (i in 1:n_svd) {
+  # Calculate meta z-score for all variants for component i
+  met_z = rowSums(sweep(sweep(mat[, slice_phe], 2, cos_phe[slice_phe, i], "*"), 1, cos_var[, i], "*"))
+
+  # Calculate meta p-value for all variants for component i
+  met_p = 2 * (1 - pnorm(abs(met_z)))
+  
+  tmp_df = data.frame(
+    svd = rep(i, length(met_z)),
+    chr = var$chr,
+    pos = var$pos,
+    ref = var$ref,
+    alt = var$alt,
+    snp = var$snp,
+    svd_var_con = tsvd_result$v[, i],
+    met_z = met_z,
+    met_p = met_p
+  )
+  
+  svd_gwa_fem = rbind(svd_gwa_fem, tmp_df)
+}
+
+svd_gwa_fem = svd_gwa_fem %>%
+  group_by(svd) %>%
+  mutate(met_p_cor_fdr = p.adjust(met_p, method = "fdr"))
+```
+
+#### Plot FEMA GWA for tSVD component as Manhattan plot
+
+```{r}
+i = 12
+
+svd_gwa_fem_dtf = svd_gwa_fem %>%
+  filter(svd == i) %>%
+  arrange(chr,pos) %>%
+  merge((svd_gwa_fem %>%
+           filter(svd == i) %>%
+           group_by(chr) %>%
+           summarize(max.pos = max(as.numeric(pos))) %>%
+           mutate(pos.add = lag(cumsum(as.numeric(max.pos)), default = 0)) %>%
+           select(chr, pos.add)),
+        by = "chr", all.x = T) %>%
+  mutate(pos.cum = pos + pos.add) %>%
+  group_by(chr) %>%
+  mutate(center = mean(pos.cum)) %>%
+  mutate(color = if_else(chr %% 2 == 1,
+                         pal[2],
+                         pal[3])) %>%
+  mutate(label = if_else(met_p_cor_fdr < 0.05,
+                         snp,
+                         NA_character_))
+  
+p.svd_gwa_fem = svd_gwa_fem_dtf %>%
+  ggplot(aes(x = pos.cum,
+             y = -log10(met_p_cor_fdr),
+             color = color)) +
+  geom_point(alpha = 0.5) +
+  geom_text_repel(aes(label = label), color = pal[3], size = 8) +
+  scale_x_continuous(
+    breaks = unique(svd_gwa_fem_dtf$center), 
+    labels = unique(svd_gwa_fem_dtf$chr)) +
+  scale_color_identity() +
+  labs(x = "genomic position",
+       y = "-log<sub>10</sub>(p)") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    panel.grid = element_line(color = pal[2]),
+    panel.border = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.y = element_markdown(),
+    axis.text.x = element_text(angle = 60, size = 20, vjust = 0.5),
+    text = element_text(color = pal[3], size = 32),
+    axis.line = element_line(color = pal[3]),
+    axis.title = element_text(color = pal[3], size = 32),
+    axis.text = element_text(color = pal[3], size = 32),
+    axis.ticks = element_line(color = pal[3])
+  )
+
+ggsave(filename = paste("p.svd_gwa_fem.i-", i, ".png", sep = ""),
+       plot = p.svd_gwa_fem,
+       device = "png",
+       bg = "transparent", 
+       width = 9.5,
+       height = 4.5,
+       units = "in")
+```
+
+#### Plot z-scores of top variant across FEMA GWA
+
+```{r}
+i = 1
+
+bind_cols(phe, data.frame(z=mat[which(var$snp == (svd_gwa_fem %>% 
+  filter(svd==i) %>% 
+  arrange(met_p_cor_fdr) %>% 
+  slice_head(n=1) %>% 
+  pull(snp))),])) %>%
+  arrange(-abs(z)) %>%
+  select(phe,short,z)
+
+bind_cols(phe, data.frame(z=mat[which(var$snp == "26:35723572:G:A"),])) %>%
+  arrange(-abs(z)) %>%
+  select(phe,short,z) %>%
+  View()
+```
+
+# Discarded Snippets
+
+The follow snippets may be handy later but don't fit in the workflow:
+
+```{r}
+# Select phenotypes of highest contribution
+  slice_phe = which(phe$phe %in% (svd_phe_scores %>%
+                                    filter(svd==i) %>%
+                                    filter(abs(fac) >= quantile(abs(fac), 0.75),
+                                           abs(con) >= quantile(abs(con), 0.75),
+                                           abs(cos) >= quantile(abs(cos), 0.75)) %>%
+                                    pull(phe)))
+
+  
+```
+
+### Generate dog covariance matrix
+
+```{r}
+mod_grm_cov = smooth(grm$kinship[rownames(grm$kinship) %in% mod_cov$dog, colnames(grm$kinship) %in% mod_cov$dog])
+```
+
+```{r}
+#mod_gwa = mat[(which(var$snp %in% mod_weights_var$snp)),(which(phe$phe %in% mod_weights_phe$phe))]
+
 ```
