@@ -24,6 +24,7 @@ library(GenomicRanges)
 library(OrganismDbi)
 library(BSgenome.Cfamiliaris.UCSC.canFam3)
 library(TxDb.Cfamiliaris.UCSC.canFam3.refGene)
+library(karyoploteR)
 library(org.Cf.eg.db)
 library(ggrepel)
 library(ggpubr)
@@ -122,10 +123,8 @@ que_short = read_csv("dat/DarwinsArk_20221120_questions_formatted.csv")
 ### Load RData to resume
 
 ```{r}
-#load("notebook.RData")
+load("notebook.RData")
 ```
-
-## Finding latent components of phenotypes from GWA data
 
 ### Prepare input data
 
@@ -153,6 +152,9 @@ id_rm = phe %>% filter(file %like% "qcov-age.fa") %>% pull(index)
 # Index item GWA with quantitative scores
 id_rm = c(id_rm, (phe %>% filter(phe_code %like% "bq." & !phe_code %like% "mean-binary") %>% pull(index)))
 
+# Index food allergy GWA
+id_rm = c(id_rm, (phe %>% filter(phe_code %like% "af." | item %in% c(177,178,179)) %>% pull(index)))
+
 # Remove indexed GWA results
 phe = phe %>% arrange(index) %>% filter(!index %in% id_rm)
 
@@ -163,7 +165,9 @@ phe = phe %>%
                                paste(factor_name," (F#",factor,")", sep = ""),
                                phe_code)))
 # Prepare variant, phenotype, and matrix data
-var = mat %>% select(chr=Chr, pos=bp, snp=SNP, ref=A2, alt=A1)
+var = mat %>% 
+  select(chr=Chr, pos=bp, snp=SNP, ref=A2, alt=A1) %>%
+  mutate(index = row_number())
 diff = setdiff(as.character(phe$index), colnames(mat))
 mat = mat %>% select(any_of(as.character(phe$index)))
 phe = phe %>% filter(index != diff)
@@ -174,13 +178,115 @@ mat[is.infinite(mat)] = 0  # replacing Inf with 0
 
 n_var = nrow(mat)
 n_phe = ncol(mat)
+
+# Add in short-form names
+phe = phe %>% merge((que_short %>% select(item=`#`,short=Short)), by = "item", all.x = T)
+
+# Re-index phenotypes
+phe = phe %>% mutate(index = row_number())
+colnames(mat) = phe$phe_code
+rownames(mat) = var$snp
+lds = lds %>% mutate(index = row_number())
 ```
 
-Add in short form names...
+### Prepare toy data set
 
 ```{r}
-phe = phe %>% merge((que_short %>% select(item=`#`,short=Short)), by = "item", all.x = T)
+# Subset markers:
+# - by LD scores with L2 > 250
+toy_lds = lds %>% filter(L2 > 250)
+toy_var = var %>% filter(snp %in% toy_lds$SNP)
+toy_mat = mat[toy_lds$index,]
+
+# Re-index LD scores and variants
+toy_lds$index = 1:nrow(toy_lds)
+toy_var$index = 1:nrow(toy_var)
 ```
+
+```{r}
+# Subset phenotypes:
+# - by min(p) < 1e-6 (at least one significant marker)
+# - by Q-Q
+# Function to transform z-scores to p-values
+z2p <- function(z) {
+  p <- 2 * pnorm(-abs(z))  # Two-sided test
+  p[p > 1] <- 1  # Ensure p-values don't exceed 1
+  return(p)
+}
+
+p_values = apply(mat, 2, z2p)
+
+# Calculate genomic inflation
+z2l <- function(z) {
+  chisq <- z^2
+  l <- median(chisq)/qchisq(0.5,1)
+  return(l)
+}
+
+lambda = apply(mat, 2, z2l)
+
+
+# Calculate the minimum p-value for each column
+min_p_values <- apply(p_values, 2, min)
+
+# Subset
+#toy_phe = phe %>% filter(phe_code %in% names(min_p_values[min_p_values < 1e-8]))
+#toy_mat = toy_mat[,toy_phe$index]
+toy_phe = phe
+```
+
+```{r}
+toy_var$L2 = toy_lds$L2
+toy_var = toy_var %>%
+  select(idx = index,
+         snp,
+         chr,
+         pos,
+         ref,
+         alt,
+         lds = L2)
+toy_phe = toy_phe %>%
+  select(idx = index,
+         phe,
+         phe_code,
+         string,
+         item,
+         short,
+         factor_name,
+         factor)
+
+write_tsv(toy_var, "toy_var.tsv.gz")
+write_tsv(toy_phe, "toy_phe.tsv.gz")
+toy_mat %>% as_tibble(rownames = "rowname") %>% write_csv("toy_mat.csv.gz")
+```
+
+## Data exploration
+
+### Plot GWAS z-scores
+
+```{r}
+kar = plotKaryotype(plot.type=4,
+                    genome = bsg,
+                    chromosomes = paste("chr", 1:38, sep = ""))
+
+dat = bind_cols(lds, data.frame(z = mat[,5])) %>%
+  mutate(start = BP, end = BP) %>%
+  mutate(CHR = paste("chr", CHR, sep ="")) %>%
+  filter(!is.na(z))
+
+dat$p = 2*pnorm(-abs(dat$z))
+
+grg = makeGRangesFromDataFrame(dat, keep.extra.columns = T, na.rm = T)
+
+kpPlotManhattan(kar, 
+                data = grg)
+
+# highlight = "chr3:1-30000000"
+```
+
+## 
+
+## Finding latent components of phenotypes from GWA data
 
 ### Calculate genetic covariance matrix adjusted by LD score
 
@@ -211,6 +317,13 @@ cor_mat_dt$Var2 = factor(cor_mat_dt$Var2, levels = rev(rownames(cor_mat)[hclust(
 
 # Get non-redundant long form
 cor_mat_dt_unique = data.frame(row = rownames(cor_mat)[which(upper.tri(cor_mat, diag = TRUE), arr.ind = TRUE)[, 1]], col = colnames(cor_mat)[which(upper.tri(cor_mat, diag = TRUE), arr.ind = TRUE)[, 2]], value = cor_mat[upper.tri(cor_mat, diag = TRUE)])
+```
+
+### Save toy data set from most correlated traits
+
+```{r}
+cor_mat_dt_unique %>%
+  filter(col!=row) %>% View()
 ```
 
 ### Plot genetic correlations across all phenotypes
@@ -768,10 +881,12 @@ svd_gwa_rem %>%
 ```{r}
 svd_phe_scores %>% group_by(svd) %>% arrange(-con) %>% slice_head(n=1) %>% mutate(label = ifelse(is.na(short), as.character(phe), as.character(short))) %>%
   dplyr::select(label,svd,con)
+
+svd_gwa_rem %>% group_by(svd) %>% arrange(met_p_cor_fdr) %>% slice_head(n=1) %>% merge((var_ann %>% dplyr::select(snp,genes)), by = "snp", all.x = T)
 ```
 
 ```{r}
-i = 1
+i = 5
 
 p.svd_phe_con = svd_phe_scores %>% 
   filter(svd==i) %>% 
@@ -819,6 +934,56 @@ p.svd_phe_con = svd_phe_scores %>%
 
 ggsave(filename = paste("p.",tsvd_out,".svd_phe_con.i-", i, ".png", sep = ""),
        plot = p.svd_phe_con,
+       device = "png",
+       bg = "transparent", 
+       width = 4,
+       height = 4,
+       units = "in")
+
+p.svd_var_con = svd_var_scores %>% 
+  filter(svd==i) %>% 
+  arrange(-con) %>% 
+  head(n=15) %>%
+  ggplot(aes(x = paste(snp,genes,sep=":"),
+             y = con)) +
+  geom_segment(
+    aes(x=paste(snp,genes,sep=":"), xend=paste(snp,genes,sep=":"), y=0, yend=con), 
+    color=pal[5], 
+    size=1.3
+  ) +
+  geom_point(
+    aes(x=paste(snp,genes,sep=":"), y=con),
+    color=pal[5], 
+    size=5
+  ) +
+  coord_flip(clip = "off") +
+  theme(
+    legend.position="none"
+  ) + 
+  scale_y_continuous(expand = c(0,0)) +
+  labs(x = "variant",
+       y = "contribution score") +
+  theme_pubr() +
+  theme(
+    legend.position = "none",
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    panel.grid = element_line(color = pal[2]),
+    panel.border = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text = element_markdown(color = pal[3], size = 32),
+    axis.text.x = element_markdown(angle = 60, size = 20, vjust = 0.5),
+    text = element_text(color = pal[3], size = 32),
+    axis.line = element_line(color = pal[3]),
+    axis.title.x = element_markdown(color = pal[3], size = 32),
+    axis.title.y = element_markdown(color = pal[3], size = 32),
+    axis.ticks = element_line(color = pal[3]),
+    plot.margin = margin(1, 44, 1, 0)
+  )
+
+ggsave(filename = paste("p.",tsvd_out,".svd_var_con.tall.i-", i, ".png", sep = ""),
+       plot = p.svd_var_con,
        device = "png",
        bg = "transparent", 
        width = 4,
