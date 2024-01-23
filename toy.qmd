@@ -54,17 +54,17 @@ showtext_auto()
 
 ```{r}
 # Read in z-score matrix file
-mat = read_csv("toy_mat.csv.gz")
+mat = read_csv("toy/toy_mat.csv.gz")
 mat_row = mat$rowname
 mat = mat %>% select(-rowname)
 mat = as.matrix(mat)
 rownames(mat) = mat_row
 
 # Read in phenotypes table
-phe = read_tsv("toy_phe.tsv.gz")
+phe = read_tsv("toy/toy_phe.tsv.gz")
 
 # Read in variants table
-var = read_tsv("toy_var.tsv.gz")
+var = read_tsv("toy/toy_var.tsv.gz")
 
 # Read in PLINK data set
 gen = BEDMatrix("dat/DarwinsArk_gp-0.70_biallelic-snps_maf-0.001_geno-0.05_hwe-1e-20-midp-keep-fewhet_N-3465_ld-100-by-50-r2-0.8.bed")
