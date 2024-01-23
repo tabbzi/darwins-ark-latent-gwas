@@ -24,6 +24,7 @@ library(lavaan)
 library(moments)
 library(factoextra)
 library(psych)
+library(umap)
 library(corrplot)
 library(PerformanceAnalytics)
 library(GenomicRanges)
@@ -52,6 +53,8 @@ org = org.Cf.eg.db
 font_add_google("Bodoni Moda", family="bodoni")
 font_add_google("Roboto Condensed", family="roboto")
 showtext_auto()
+
+out = "2024-01-23"
 ```
 
 ### Load data set
@@ -81,6 +84,40 @@ dog = read_csv("data_release/dat/DarwinsArk_20221120_dogs.csv")
 que = read_csv("data_release/dat/DarwinsArk_20221120_questions.csv")
 ans = read_csv("data_release/dat/DarwinsArk_20221120_answers.csv")
 ```
+
+### Annotate gene ranges and annotations
+
+```{r}
+gene_range_threshold = 250000
+
+vgr =  GRanges(
+  seqnames = paste("chr", var$chr, sep = ""),
+  ranges = IRanges(start = var$pos, end = var$pos),
+  snp = var$snp,
+  ref = var$ref,
+  alt = var$alt, 
+  seqinfo = seqinfo(bsg)
+)
+
+cds = cdsBy(txd, by = "gene")
+
+ovl = findOverlaps(vgr, cds + gene_range_threshold)
+
+var_ann = var[queryHits(ovl),]
+var_ann$gene_id = names(cds[subjectHits(ovl)])
+var_ann$gene_symbol = mapIds(org,
+                             keys = var_ann$gene_id, 
+                             column = "SYMBOL", 
+                             keytype = "ENTREZID") 
+
+var_ann = var_ann %>%
+  group_by(snp) %>%
+  summarise(genes = paste(gene_symbol, collapse = ","))
+
+var = var %>% merge(var_ann, by = "snp", all.x = T)
+```
+
+### 
 
 ### Save RData
 
@@ -203,29 +240,73 @@ pheatmap::pheatmap(cor_mat,
 
 ## Prune data set
 
-Genomic associations for morphology traits are very strong, and may bias?
+Genomic associations for morphology traits are very strong, more so than behavior associations. Let's remove most of these:
+
+```{r}
+phe = phe %>% filter(phe_code %like% "bq." | 
+                       phe_code == "age" | 
+                       phe_code %in% c("mq.121"))
+mat = mat[,phe$idx]
+```
+
+# Coding with R-ubber Duckies!
+
+## Pseudo-code
+
+```{r}
+
+```
+
+## Attempt
+
+```{r}
+
+```
+
+## Sanity Check
+
+```{r}
+
+```
+
+## Document
+
+```{r}
+
+```
+
+# Work-in-progress code
 
 ## Principal component analysis
 
 ### Perform principal component analysis
 
 ```{r}
-pca_res_var = FactoMineR::PCA(t(mat), 
+pca_res = FactoMineR::PCA(t(mat), 
                           scale.unit = TRUE, 
                           ncp = 10, 
                           graph = FALSE)
-
-pca_res_ind = FactoMineR::PCA(mat, 
-                          scale.unit = TRUE, 
-                          ncp = 10, 
-                          graph = FALSE)
-
 ```
 
-### Select results
+### Explore results
 
 ```{r}
-pca_res = pca_res_ind
+bind_cols(phe$phe, pca_res$ind$contrib %>% as_tibble()) %>% arrange(-Dim.1)
+```
+
+```{r}
+bind_cols(snp= var$snp, 
+          genes= var$genes, 
+          pca_res$var$contrib %>% as_tibble()) %>% 
+  arrange(-Dim.1)
+```
+
+```{r}
+# Which trait GWAS had high effects for top SNP in PCA?
+this_snp = "24:32752934:G:C"
+mat[(var %>% filter(snp == this_snp) %>% pull(idx)),] %>% as_tibble() %>% 
+  mutate(phe = phe$phe) %>%
+  arrange(-abs(value))
 ```
 
 ### Plot relative variance explained by each PC
@@ -265,33 +346,13 @@ ggsave(filename = paste("toy/plot.","pca",".scree-plot.png", sep =" "),
 p.scree
 ```
 
-```{r}
+### Visualize components by traits captured
 
-fviz_pca_var(pca_res, alpha.var="contrib")+
+```{r}
+p.pca_ind = fviz_pca_ind(pca_res, col.var="contrib") +
   theme_minimal()
-```
 
-```{r}
-fviz_pca_ind(pca_res, col.var="contrib") +
-  theme_minimal()
-```
-
-```{r}
-fviz_pca_biplot(pca_res, geom = "text")
-```
-
-## Exploratory factor analysis
-
-### Perform EFA with FactoMineR
-
-```{r}
-
-```
-
-### Visualize with factoextra
-
-```{r}
-facto_summarize(efa_res)
+p.pca_ind
 ```
 
 ## Structural value decomposition
@@ -300,60 +361,20 @@ facto_summarize(efa_res)
 
 ```{r}
 # Run truncated singular value decomposition on n_var columns x n_phe rows (transpose)
-n_svd = 40
+n_svd = 10
 svd_res = irlba(t(mat), nv = n_svd)
 
 # Save tSVD results to file
-write_csv(as.data.frame(tsvd_result$d), "d_values.csv")
-write_csv(as.data.frame(tsvd_result$u), "u_values.csv")
-write_csv(as.data.frame(tsvd_result$v), "v_values.csv")
-```
-
-### Run tSVD on morphology and behavior phenotypes separately
-
-#### Detect noisy GWA results
-
-```{r}
-mat_stats <- data.frame(
-  phe = colnames(mat),
-  mean = colMeans(mat, na.rm = TRUE),
-  median = apply(mat, 2, median, na.rm = TRUE),
-  sd = apply(mat, 2, sd, na.rm = TRUE),
-  skewness = apply(mat, 2, skewness, na.rm = TRUE),
-  kurtosis = apply(mat, 2, kurtosis, na.rm = TRUE)
-) %>%
-  merge(phe, by.x = "phe", by.y = "index" ,all.x = T)
-```
-
-#### Select morphology and behavior phenotypes
-
-```{r}
-phe_morph = phe %>% filter(phe_code %like% "mq." | phe_code %like% "mp.")
-phe_behav = phe %>% filter(phe_code %like% "bq.")
-```
-
-#### Run tSVD on morphology and behavior phenotypes
-
-```{r}
-n_svd = 20
-
-#svd_res_phe_morph = irlba(t(mat[,colnames(mat) %in% phe_morph$index]), nv = n_svd)
-svd_res_phe_behav = irlba(t(mat[,colnames(mat) %in% as.character(phe_behav$index)]), nv = n_svd)
-```
-
-### Set which tSVD to run below
-
-```{r}
-tsvd_result = svd_res_phe_behav
-tsvd_out = "svd-phe-behav"
-idx_phe = as.character(phe_behav$index)
+write_csv(as.data.frame(svd_res$d), "toy/d_values.csv")
+write_csv(as.data.frame(svd_res$u), "toy/u_values.csv")
+write_csv(as.data.frame(svd_res$v), "toy/v_values.csv")
 ```
 
 ### Plot relative variance explained by each latent component
 
 ```{r}
-p.scree = data.frame(S = tsvd_result$d,
-                     index = 1:length(tsvd_result$d)) %>%
+p.scree = data.frame(S = svd_res$d,
+                     index = 1:length(svd_res$d)) %>%
   mutate(prop_variance = S^2 / sum(S^2)) %>%
   ggplot(aes(x = index, 
              y = prop_variance)) +
@@ -374,7 +395,7 @@ p.scree = data.frame(S = tsvd_result$d,
         axis.title = element_text(color = pal[3], size = 32),
         axis.text = element_text(color = pal[3], size = 32),
         axis.ticks = element_line(color = pal[3])) 
-ggsave(filename = paste("plot.",tsvd_out,".scree-plot.png", sep =" "),
+ggsave(filename = paste("toy/plot.",out,".scree-plot.png", sep =" "),
        plot = p.scree,
        device = "png",
        bg = "transparent", 
@@ -390,18 +411,18 @@ Here, we generate factor scores that are equivalent to principal components in P
 
 ```{r}
 # Calculate factor scores -- equivalent to PCA -- for phenotypes and variants
-fac_phe = tsvd_result$u %*% diag(tsvd_result$d)
-fac_var = tsvd_result$v %*% diag(tsvd_result$d)
+fac_phe = svd_res$u %*% diag(svd_res$d)
+fac_var = svd_res$v %*% diag(svd_res$d)
 
 # Calculate contribution scores for phenotypes and variants
-con_phe = matrix(0, nrow(tsvd_result$u), ncol(tsvd_result$u))
-con_var = matrix(0, nrow(tsvd_result$v), ncol(tsvd_result$v))
+con_phe = matrix(0, nrow(svd_res$u), ncol(svd_res$u))
+con_var = matrix(0, nrow(svd_res$v), ncol(svd_res$v))
 
-for (k in 1:ncol(tsvd_result$u)) {
-  con_phe[, k] = tsvd_result$u[, k]^2
+for (k in 1:ncol(svd_res$u)) {
+  con_phe[, k] = svd_res$u[, k]^2
   con_phe[, k] = con_phe[, k] / sum(con_phe[, k])
 
-  con_var[, k] = tsvd_result$v[, k]^2
+  con_var[, k] = svd_res$v[, k]^2
   con_var[, k] = con_var[, k] / sum(con_var[, k])
 }
 
@@ -425,120 +446,6 @@ for (i in seq(1, nrow(fac_var), by = batch_size)) {
 # rowSums(cos_var)
 ```
 
-#### Plot phenotype factor scores for PC1 and PC2
-
-```{r}
-p.fac_phe = bind_cols(phe %>% filter(index %in% idx_phe), as.data.frame(fac_phe)) %>%
-  ggplot() +
-  geom_point(aes(x = V1, y = V2),
-           shape = 1,
-           color = pal[5]) +
-  geom_text_repel(aes(x = V1,
-                      y = V2,
-                      label = short),
-                  box.padding = 0.5) +
-  coord_equal() +
-  theme_pubr() +
-  theme(legend.position = "none",
-        panel.background = element_blank(),
-        plot.background = element_blank(),
-        text = element_text(color = pal[3], size = 32),
-        axis.line = element_line(color = pal[3]),
-        axis.title = element_text(color = pal[3], size = 32),
-        axis.text = element_text(color = pal[3], size = 32),
-        axis.ticks = element_line(color = pal[3]))
-
-p.fac_phe
-```
-
-#### Plot projection of phenotypes and variants onto principal components
-
-```{r}
-arrow_max_scale = 2
-arrow_max = max(abs(fac_var)) * arrow_max_scale
-
-p.fac_var = ggplot() +
-  geom_hex(data = bind_cols(var, as.data.frame(fac_var)),
-           aes(x = V1, y = V2), bins = 50) +
-  geom_segment(data = as.data.frame(tsvd_result$u),
-               aes(x = 0, y = 0,
-                   xend = V1 * arrow_max, yend = V2 * arrow_max),
-               color = pal[3], 
-               linewidth = 0.25,
-               alpha = 0.5) +
-  scale_fill_viridis_c(direction = -1) +
-  coord_equal() +
-  theme_pubr() +
-  theme(legend.position = "none",
-        panel.background = element_blank(),
-        plot.background = element_blank(),
-        text = element_text(color = pal[3], size = 32),
-        axis.line = element_line(color = pal[3]),
-        axis.title = element_text(color = pal[3], size = 32),
-        axis.text = element_text(color = pal[3], size = 32),
-        axis.ticks = element_line(color = pal[3]))
-
-# Main plot for phenotypes
-p.fac_phe = ggplot() +
-  geom_point(data = as.data.frame(fac_phe),
-           aes(x = V1, y = V2),
-           shape = 1,
-           color = pal[5]) +
-  coord_equal() +
-  theme_pubr() +
-  theme(legend.position = "none",
-        panel.background = element_blank(),
-        plot.background = element_blank(),
-        text = element_text(color = pal[3], size = 32),
-        axis.line = element_line(color = pal[3]),
-        axis.title = element_text(color = pal[3], size = 32),
-        axis.text = element_text(color = pal[3], size = 32),
-        axis.ticks = element_line(color = pal[3]))
-
-# Combine the two plots
-p.biplot = p.fac_var + p.fac_phe + plot_layout(ncol = 2)
-
-ggsave(filename = "plot.bi-plot.png",
-       plot = p.biplot,
-       device = "png",
-       bg = "transparent", 
-       width = 8,
-       height = 5,
-       units = "in")
-```
-
-```{r}
-p.fac_var = ggplot() +
-  geom_hex(data = bind_cols(var, as.data.frame(fac_var)),
-           aes(x = V1, y = V2),
-           bins = 20) +
-  geom_segment(data = as.data.frame(tsvd_result$u[, 1:2]),
-               aes(x = 0, y = 0, 
-                   xend = V1 * max(abs(fac_var)), yend = V2 * max(abs(fac_var))),
-               arrow = arrow(type = "closed", 
-                             length = unit(0.2, "inches")), 
-               color = pal[5]) +
-  annotate("segment",
-           x = rep(0, nrow(tsvd_result$u)),
-           y = rep(0, nrow(tsvd_result$u)),
-           xend = tsvd_result$u[, 1],
-           yend = tsvd_result$u[, 2],
-           linetype = "dashed",
-           color = "black",
-           alpha = 0.5,
-           arrow = arrow(type = "open", length = unit(0, "inches")),
-           size = 0.5) +
-  theme_pubr() +
-  theme(legend.position = "none",
-        panel.background = element_blank(),
-        plot.background = element_blank(),
-        text = element_text(color = pal[3], size = 32),
-        axis.line = element_line(color = pal[3]),
-        axis.title = element_text(color = pal[3], size = 32),
-        axis.text = element_text(color = pal[3], size = 32),
-        axis.ticks = element_line(color = pal[3]))
-```
-
 #### Summarize scores across variants
 
 ```{r}
@@ -554,10 +461,16 @@ svd_var_scores = bind_cols((var[rep(seq_len(nrow(var)), times = ncol(fac_var)), 
   select(-svd)))
 ```
 
+```{r}
+svd_var_scores %>%
+  filter(svd == 1) %>%
+  arrange(-fac)
+```
+
 #### Summarize scores across phenotypes
 
 ```{r}
-svd_phe_scores = bind_cols(((phe %>% filter(index %in% idx_phe))[rep(seq_len(nrow(phe[idx_phe,])), times = ncol(fac_phe)), , drop = FALSE]),
+svd_phe_scores = bind_cols(((phe)[rep(seq_len(nrow(phe)), times = ncol(fac_phe)), , drop = FALSE]),
                            (as.data.frame(fac_phe) %>% 
   pivot_longer(everything(), names_to = "svd", values_to = "fac") %>%
   mutate(svd = as.integer(gsub("V", "", svd)))),
@@ -568,6 +481,12 @@ svd_phe_scores = bind_cols(((phe %>% filter(index %in% idx_phe))[rep(seq_len(nro
   pivot_longer(everything(), names_to = "svd", values_to = "cos") %>%
   select(-svd)))
 
+```
+
+```{r}
+svd_phe_scores %>%
+  filter(svd == 1) %>%
+  arrange(-fac)
 ```
 
 #### Plot phenotype scores
@@ -1071,7 +990,7 @@ top_n_var = 10000
 top_n_phe = 50 
 
 # Calculate weights as proportion variance explained
-svd_weights = sqrt((tsvd_result$d)^2 / sum((tsvd_result$d)^2))
+svd_weights = sqrt((svd_res$d)^2 / sum((svd_res$d)^2))
 
 # Pull phenotype and variant info
 mod_weights_var = var
@@ -1082,10 +1001,10 @@ mod_weights_var$svd = i
 mod_weights_phe$svd = i
 
 # Weight variant singular values by variance explained by components
-mod_weights_var$weight = svd_weights[i] * tsvd_result$v[,i]
+mod_weights_var$weight = svd_weights[i] * svd_res$v[,i]
 
 # Weight phenotype singular values by variance explained by components
-mod_weights_phe$weight = svd_weights[i] * tsvd_result$u[,i]
+mod_weights_phe$weight = svd_weights[i] * svd_res$u[,i]
 
 # Sort by magnitude and select
 mod_weights_var =  mod_weights_var %>% 
@@ -1354,15 +1273,15 @@ nrow(grm$kinship)
 ncol(grm$kinship)
 
 # tSVD d vector n_svd components
-length(tsvd_result$d)
+length(svd_res$d)
 
 # tSVD u matrix n_phe phenotypes x n_svd components
-nrow(tsvd_result$u)
-ncol(tsvd_result$u)
+nrow(svd_res$u)
+ncol(svd_res$u)
 
 # tSVD v matrix n_var variants x n_svd components
-nrow(tsvd_result$v)
-ncol(tsvd_result$v)
+nrow(svd_res$v)
+ncol(svd_res$v)
 
 # original GWA matrix of z-scores n_var variants x n_phe phenotypes
 nrow(mat)
@@ -1394,7 +1313,7 @@ for (i in 1:n_svd) {
     ref = var$ref,
     alt = var$alt,
     snp = var$snp,
-    svd_var_con = tsvd_result$v[, i],
+    svd_var_con = svd_res$v[, i],
     met_z = met_z,
     met_p = met_p
   )
