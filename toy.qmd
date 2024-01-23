@@ -22,6 +22,10 @@ library(genio)
 library(irlba)
 library(lavaan)
 library(moments)
+library(factoextra)
+library(psych)
+library(corrplot)
+library(PerformanceAnalytics)
 library(GenomicRanges)
 library(OrganismDbi)
 library(BSgenome.Cfamiliaris.UCSC.canFam3)
@@ -78,7 +82,19 @@ que = read_csv("data_release/dat/DarwinsArk_20221120_questions.csv")
 ans = read_csv("data_release/dat/DarwinsArk_20221120_answers.csv")
 ```
 
-## Finding latent components of phenotypes from GWA data
+### Save RData
+
+```{r}
+save.image("toy.RData")
+```
+
+### Load RData
+
+```{r}
+load("toy.RData")
+```
+
+## Summary statistics
 
 ### Calculate genetic covariance matrix adjusted by LD score
 
@@ -163,11 +179,14 @@ ggsave(filename = "toy/p.gen-cor.png",
 ### View and save widget of genetic correlation interactive plot
 
 ```{r}
-fig = plot_ly(x = colnames(cor_mat), y = rownames(cor_mat), z = cor_mat, type = "heatmap") %>%
+fig = plot_ly(x = colnames(cor_mat), 
+              y = rownames(cor_mat), 
+              z = cor_mat, 
+              type = "heatmap") %>%
   layout(title = "LD score regressed genetic correlation matrix",
          xaxis = list(showticklabels = FALSE, showgrid = FALSE, zeroline = FALSE))
 fig
-htmlwidgets::saveWidget(fig, "interactive_heatmap.html")
+htmlwidgets::saveWidget(fig, "toy/interactive_heatmap.html")
 
 pheatmap::pheatmap(cor_mat,
                    show_rownames = F, 
@@ -177,10 +196,105 @@ pheatmap::pheatmap(cor_mat,
                    cluster_cols = F, 
                    legend = F,
                    scale = "none",
-                   filename = "p.gen-cor.pheatmap.png",
+                   filename = "toy/p.gen-cor.pheatmap.png",
                    width = 9.5,
                    height = 4.5)
 ```
+
+## Prune data set
+
+Genomic associations for morphology traits are very strong, and may bias?
+
+## Principal component analysis
+
+### Perform principal component analysis
+
+```{r}
+pca_res_var = FactoMineR::PCA(t(mat), 
+                          scale.unit = TRUE, 
+                          ncp = 10, 
+                          graph = FALSE)
+
+pca_res_ind = FactoMineR::PCA(mat, 
+                          scale.unit = TRUE, 
+                          ncp = 10, 
+                          graph = FALSE)
+
+```
+
+### Select results
+
+```{r}
+pca_res = pca_res_ind
+```
+
+### Plot relative variance explained by each PC
+
+```{r}
+p.scree = as_tibble(pca_res$eig) %>%
+  mutate(idx = row_number()) %>%
+  filter(idx < 25) %>%
+  ggplot(aes(x = idx, 
+             y = eigenvalue)) +
+  geom_line(color = pal[3]) +
+  geom_point(color = pal[3], 
+             shape = 21, 
+             fill = pal[2], 
+             stroke = 1, 
+             size = 3) +
+  xlab("component index") +
+  ylab("proportion of variance explained") +
+  theme_pubr() +
+  theme(legend.position = "none",
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        text = element_text(color = pal[3], size = 32),
+        axis.line = element_line(color = pal[3]),
+        axis.title = element_text(color = pal[3], size = 32),
+        axis.text = element_text(color = pal[3], size = 32),
+        axis.ticks = element_line(color = pal[3])) 
+
+ggsave(filename = paste("toy/plot.","pca",".scree-plot.png", sep =" "),
+       plot = p.scree,
+       device = "png",
+       bg = "transparent", 
+       width = 6,
+       height = 5,
+       units = "in")
+
+p.scree
+```
+
+```{r}
+
+fviz_pca_var(pca_res, alpha.var="contrib")+
+  theme_minimal()
+```
+
+```{r}
+fviz_pca_ind(pca_res, col.var="contrib") +
+  theme_minimal()
+```
+
+```{r}
+fviz_pca_biplot(pca_res, geom = "text")
+```
+
+## Exploratory factor analysis
+
+### Perform EFA with FactoMineR
+
+```{r}
+
+```
+
+### Visualize with factoextra
+
+```{r}
+facto_summarize(efa_res)
+```
+
+## Structural value decomposition
 
 ### Run truncated singular value decomposition (tSVD) using irlba package
 
