@@ -7,8 +7,6 @@ format: html
 editor: visual
 ---
 
-The following toy example of this data set includes only GWAS summary statistics for association studies of survey items contributing to factor 6 (biddability), factor 24 (separation anxiety), and two physical traits (height and
-
 ## Prepare data
 
 ### Load libraries
@@ -117,15 +115,11 @@ var_ann = var_ann %>%
 var = var %>% merge(var_ann, by = "snp", all.x = T)
 ```
 
-### 
-
-### Save RData
+### Save and load RData
 
 ```{r}
 save.image("toy.RData")
 ```
-
-### Load RData
 
 ```{r}
 load("toy.RData")
@@ -298,7 +292,25 @@ bind_cols(phe$phe, pca_res$ind$contrib %>% as_tibble()) %>% arrange(-Dim.1)
 bind_cols(snp= var$snp, 
           genes= var$genes, 
           pca_res$var$contrib %>% as_tibble()) %>% 
-  arrange(-Dim.1)
+  arrange(-Dim.6)
+```
+
+```{r}
+# Pull those genes!
+bind_cols(snp= var$snp, 
+          genes= var$genes, 
+          pca_res$var$contrib %>% as_tibble()) %>% 
+  arrange(-Dim.5) %>%
+  head(n=20) %>%
+  pull(genes) %>%
+  unique() %>%
+  paste(collapse = ",")
+```
+
+```{r}
+bind_cols(phe= phe$phe, 
+          pca_res$ind$contrib %>% as_tibble()) %>% 
+  arrange(-Dim.6)
 ```
 
 ```{r}
@@ -353,6 +365,18 @@ p.pca_ind = fviz_pca_ind(pca_res, col.var="contrib") +
   theme_minimal()
 
 p.pca_ind
+```
+
+### Summarize by trait
+
+```{r}
+
+```
+
+### Summarize by variant
+
+```{r}
+
 ```
 
 ## Structural value decomposition
@@ -463,8 +487,8 @@ svd_var_scores = bind_cols((var[rep(seq_len(nrow(var)), times = ncol(fac_var)), 
 
 ```{r}
 svd_var_scores %>%
-  filter(svd == 1) %>%
-  arrange(-fac)
+  filter(svd == 4) %>%
+  arrange(-abs(con))
 ```
 
 #### Summarize scores across phenotypes
@@ -485,8 +509,8 @@ svd_phe_scores = bind_cols(((phe)[rep(seq_len(nrow(phe)), times = ncol(fac_phe))
 
 ```{r}
 svd_phe_scores %>%
-  filter(svd == 1) %>%
-  arrange(-fac)
+  filter(svd == 4) %>%
+  arrange(-abs(con))
 ```
 
 #### Plot phenotype scores
